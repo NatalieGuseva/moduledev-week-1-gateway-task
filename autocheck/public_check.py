@@ -1713,6 +1713,7 @@ SELECT jsonb_build_object(
         return self.result_report()
 
     def close(self) -> None:
+        return
         if not self.args.keep_stack and self.override.exists():
             self.compose("down", "-v", "--remove-orphans", timeout=180)
         shutil.rmtree(self.temp, ignore_errors=True)

@@ -1,0 +1,93 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: moduldev-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-course}
+    volumes:
+      - course_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-course}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - moduldev-network
+    restart: unless-stopped
+
+
+  cli:
+    build:
+      context: .
+      dockerfile: Cli/Dockerfile
+    container_name: moduldev-cli
+    command: ["migration", "apply", "/app/Migrations/ChecksummedMigrations"]
+    restart: "no"
+    volumes:
+      - ./Api/Migrations:/app/Migrations
+    environment:
+      - ConnectionStrings__CourseDb=Host=postgres;Database=${POSTGRES_DB:-course};Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD}
+      - COURSE_JWT_SIGNING_KEY=${COURSE_JWT_SIGNING_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - moduldev-network
+    stdin_open: true
+    tty: true
+
+  api:
+    build:
+      context: .
+      dockerfile: Api/Dockerfile
+    container_name: moduldev-api
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      #start_period: 30s
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ASPNETCORE_URLS=http://0.0.0.0:8080
+      - COURSE_JWT_ISSUER=${COURSE_JWT_ISSUER}
+      - COURSE_JWT_AUDIENCE=${COURSE_JWT_AUDIENCE}
+      - COURSE_JWT_SIGNING_KEY=${COURSE_JWT_SIGNING_KEY}
+      - ConnectionStrings__CourseDb=Host=postgres;Database=${POSTGRES_DB:-course};Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD}
+    expose:
+      - "8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      cli:
+        condition: service_completed_successfully
+    networks:
+      - moduldev-network
+    restart: unless-stopped
+
+  gateway:
+    build:
+      context: .
+      dockerfile: Gateway/Dockerfile
+    container_name: moduldev-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ASPNETCORE_URLS=http://0.0.0.0:8080
+      - Api__Url=http://api:8080
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - moduldev-network
+    restart: unless-stopped
+
+volumes:
+  course_pgdata:
+
+networks:
+  moduldev-network:
+    driver: bridge
