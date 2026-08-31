@@ -30,6 +30,7 @@ services:
     environment:
       - ConnectionStrings__CourseDb=Host=postgres;Database=${POSTGRES_DB:-course};Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD}
       - COURSE_JWT_SIGNING_KEY=${COURSE_JWT_SIGNING_KEY}
+      - COURSE_WORKFLOW_WORKER_PASSWORD=${COURSE_WORKFLOW_WORKER_PASSWORD}
     depends_on:
       postgres:
         condition: service_healthy
@@ -81,6 +82,44 @@ services:
     depends_on:
       api:
         condition: service_healthy
+    networks:
+      - moduldev-network
+    restart: unless-stopped
+
+  worker-a:
+    build:
+      context: .
+      dockerfile: Workflow.Worker/Dockerfile
+    container_name: moduldev-worker-a
+    environment:
+      - ConnectionStrings__CourseDb=Host=postgres;Database=${POSTGRES_DB:-course};Username=workflow_worker;Password=${COURSE_WORKFLOW_WORKER_PASSWORD}
+      - COURSE_INSTANCE_ID=worker-a
+      - COURSE_TEST_PROFILE=${COURSE_TEST_PROFILE:-0}
+      - COURSE_FAILPOINT=${COURSE_FAILPOINT:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      cli:
+        condition: service_completed_successfully
+    networks:
+      - moduldev-network
+    restart: unless-stopped
+
+  worker-b:
+    build:
+      context: .
+      dockerfile: Workflow.Worker/Dockerfile
+    container_name: moduldev-worker-b
+    environment:
+      - ConnectionStrings__CourseDb=Host=postgres;Database=${POSTGRES_DB:-course};Username=workflow_worker;Password=${COURSE_WORKFLOW_WORKER_PASSWORD}
+      - COURSE_INSTANCE_ID=worker-b
+      - COURSE_TEST_PROFILE=${COURSE_TEST_PROFILE:-0}
+      - COURSE_FAILPOINT=${COURSE_FAILPOINT:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      cli:
+        condition: service_completed_successfully
     networks:
       - moduldev-network
     restart: unless-stopped

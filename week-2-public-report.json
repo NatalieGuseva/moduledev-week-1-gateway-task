@@ -1,0 +1,170 @@
+{
+  "manifestVersion": "week-2-public-report/v1",
+  "toolVersion": "week-2-public-check/1.1",
+  "timestamps": {
+    "startedAt": "2026-08-31T18:44:24.091719+00:00",
+    "finishedAt": "2026-08-31T18:44:24.433099+00:00"
+  },
+  "status": "failed",
+  "checks": [
+    {
+      "name": "fixture-integrity",
+      "phase": "admission",
+      "status": "passed",
+      "expected": "fdae621f8c88b02e4ee50ba3cec2658470a177da68e5b438349a380d100071d4",
+      "actual": "fdae621f8c88b02e4ee50ba3cec2658470a177da68e5b438349a380d100071d4"
+    },
+    {
+      "name": "repository-contract",
+      "phase": "admission",
+      "status": "failed",
+      "expected": "README sections, launch/check commands and clean tracked artifacts",
+      "actual": [
+        "missing README section запуск",
+        "missing README value docker compose up -d --build"
+      ]
+    },
+    {
+      "name": "compose-contract",
+      "phase": "admission",
+      "status": "failed",
+      "expected": [
+        "api",
+        "cli",
+        "gateway",
+        "postgres",
+        "worker-a",
+        "worker-b"
+      ],
+      "actual": {
+        "exitCode": 125
+      }
+    },
+    {
+      "name": "migration-and-action-publication",
+      "phase": "publication",
+      "status": "failed",
+      "expected": "published contract satisfied",
+      "actual": "Admission prerequisite failed"
+    },
+    {
+      "name": "map-validation-and-publication",
+      "phase": "publication",
+      "status": "failed",
+      "expected": "published contract satisfied",
+      "actual": "Admission prerequisite failed"
+    },
+    {
+      "name": "publication-image-immutability",
+      "phase": "publication",
+      "status": "failed",
+      "expected": "published contract satisfied",
+      "actual": "Admission prerequisite failed"
+    },
+    {
+      "name": "automatic-signal-end",
+      "phase": "execution",
+      "status": "failed",
+      "expected": "published contract satisfied",
+      "actual": "Admission prerequisite failed"
+    },
+    {
+      "name": "signal-idempotency-and-history",
+      "phase": "execution",
+      "status": "failed",
+      "expected": "published contract satisfied",
+      "actual": "Admission prerequisite failed"
+    },
+    {
+      "name": "manual-wait",
+      "phase": "execution",
+      "status": "failed",
+      "expected": "published contract satisfied",
+      "actual": "Admission prerequisite failed"
+    },
+    {
+      "name": "stable-views",
+      "phase": "execution",
+      "status": "failed",
+      "expected": "published contract satisfied",
+      "actual": "Admission prerequisite failed"
+    },
+    {
+      "name": "version-pinning-and-start-idempotency",
+      "phase": "versioning",
+      "status": "failed",
+      "expected": "published contract satisfied",
+      "actual": "Admission prerequisite failed"
+    },
+    {
+      "name": "two-worker-reclaim-and-stale-finish",
+      "phase": "concurrency",
+      "status": "failed",
+      "expected": "published contract satisfied",
+      "actual": "Admission prerequisite failed"
+    },
+    {
+      "name": "action-finish-rollback-and-recovery",
+      "phase": "recovery",
+      "status": "failed",
+      "expected": "published contract satisfied",
+      "actual": "Admission prerequisite failed"
+    },
+    {
+      "name": "bounded-retry-and-terminal-failures",
+      "phase": "resilience",
+      "status": "failed",
+      "expected": "published contract satisfied",
+      "actual": "Admission prerequisite failed"
+    },
+    {
+      "name": "worker-recreate-persistence",
+      "phase": "resilience",
+      "status": "failed",
+      "expected": "published contract satisfied",
+      "actual": "Admission prerequisite failed"
+    },
+    {
+      "name": "runtime-image-immutability",
+      "phase": "integrity",
+      "status": "failed",
+      "expected": "published contract satisfied",
+      "actual": "Admission prerequisite failed"
+    }
+  ],
+  "failedChecks": [
+    "repository-contract",
+    "compose-contract",
+    "migration-and-action-publication",
+    "map-validation-and-publication",
+    "publication-image-immutability",
+    "automatic-signal-end",
+    "signal-idempotency-and-history",
+    "manual-wait",
+    "stable-views",
+    "version-pinning-and-start-idempotency",
+    "two-worker-reclaim-and-stale-finish",
+    "action-finish-rollback-and-recovery",
+    "bounded-retry-and-terminal-failures",
+    "worker-recreate-persistence",
+    "runtime-image-immutability"
+  ],
+  "commands": [
+    {
+      "command": [
+        "bash",
+        "<repo>\\autocheck\\safe_compose.sh",
+        "--project-name",
+        "moduledev-w2-421581651880",
+        "-f",
+        "<repo>\\docker-compose.yml",
+        "config",
+        "--format",
+        "json",
+        "--no-env-resolution"
+      ],
+      "exitCode": 125,
+      "timedOut": false
+    }
+  ]
+}

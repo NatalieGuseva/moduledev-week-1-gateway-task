@@ -24,6 +24,7 @@ class Program
             {
                 "migration" => await HandleMigrationCommand(args.Skip(1).ToArray()),
                 "action" => await HandleActionCommand(args.Skip(1).ToArray()),
+                "flow" => await Cli.Commands.FlowCommands.Handle(args.Skip(1).ToArray()),
                 _ => throw new InvalidOperationException($"Unknown command: {command}")
             };
             
@@ -541,6 +542,21 @@ class Program
         
         applied.Add(fileName);
         Console.Error.WriteLine($"applying {fileName}");
+    }
+
+    // workflow_worker создаётся в 005_workflow_schema.sql как NOLOGIN — под ней
+    // нельзя подключиться напрямую, и все её точечные GRANT/REVOKE ничего не
+    // значат, пока Workflow.Worker подключается тем же суперпользователем, что
+    // Api и Cli. Здесь (а не в самой миграции, потому что миграции — статичные
+    // .sql файлы без доступа к переменным окружения) даём роли реальный LOGIN
+    // и пароль из окружения, если он задан. ALTER ROLE идемпотентен — повторный
+    // прогон просто переустановит тот же пароль.
+    var workflowWorkerPassword = Environment.GetEnvironmentVariable("COURSE_WORKFLOW_WORKER_PASSWORD");
+    if (!string.IsNullOrEmpty(workflowWorkerPassword))
+    {
+        var escaped = workflowWorkerPassword.Replace("'", "''");
+        await connection.ExecuteAsync($"ALTER ROLE workflow_worker WITH LOGIN PASSWORD '{escaped}'");
+        Console.Error.WriteLine("workflow_worker role is now LOGIN-capable (password set from COURSE_WORKFLOW_WORKER_PASSWORD)");
     }
 
     var result = new
