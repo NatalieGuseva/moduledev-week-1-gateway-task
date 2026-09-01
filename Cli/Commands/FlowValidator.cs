@@ -227,6 +227,11 @@ public static class FlowValidator
 
         var task = step.Task;
 
+        if (task.Service != "postgres")
+        {
+            errors.Add($"step '{step.Key}': task.service must be 'postgres' (the only supported action runtime), got '{task.Service}'");
+        }
+
         if (task.Retry.DelaysMs.Count != task.Retry.MaxAttempts - 1)
         {
             errors.Add(

@@ -65,7 +65,11 @@ public class StepRunner
             Scopes = JsonSerializer.Deserialize<string[]>(job.RequiredPolicy) ?? Array.Empty<string>(),
             CorrelationId = Guid.NewGuid(),
             RequestId = job.ExecutionId.ToString(),
-            Deadline = DateTimeOffset.UtcNow.AddMilliseconds(job.TimeoutMs ?? 30000) // окончательно пересчитывается ActionExecutor'ом из timeoutMsOverride ниже
+            Deadline = DateTimeOffset.UtcNow.AddMilliseconds(job.TimeoutMs ?? 30000), // окончательно пересчитывается ActionExecutor'ом из timeoutMsOverride ниже
+            ProcessId = job.ProcessId,
+            JobId = job.JobId,
+            ExecutionId = job.ExecutionId,
+            AttemptId = job.AttemptId
         };
 
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);

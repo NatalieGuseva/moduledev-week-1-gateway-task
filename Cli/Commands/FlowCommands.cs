@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Dapper;
 using Npgsql;
 
@@ -490,6 +491,11 @@ public static class FlowCommands
     // Общие хелперы
     // ------------------------------------------------------------
 
+    private static readonly JsonSerializerOptions StrictManifestOptions = new()
+    {
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
+    };
+
     private static async Task<(FlowManifest? Manifest, string? Error)> ReadManifest(string path)
     {
         if (!File.Exists(path)) return (null, $"map file not found: {path}");
@@ -497,13 +503,18 @@ public static class FlowCommands
         try
         {
             var json = await File.ReadAllTextAsync(path);
-            var manifest = JsonSerializer.Deserialize<FlowManifest>(json);
+            // UnmappedMemberHandling.Disallow — лишние/неизвестные поля где угодно
+            // в манифесте (в т.ч. на верхнем уровне) должны быть отклонены, а не
+            // молча проигнорированы: это отдельный пункт semantic-валидации
+            // ("no unknown fields per JSON Schema course-1"), а не только
+            // структурная схема.
+            var manifest = JsonSerializer.Deserialize<FlowManifest>(json, StrictManifestOptions);
             if (manifest == null) return (null, "failed to parse map JSON");
             return (manifest, null);
         }
         catch (JsonException ex)
         {
-            return (null, $"map is not valid JSON: {ex.Message}");
+            return (null, $"map is not valid JSON or contains unknown fields: {ex.Message}");
         }
     }
 
