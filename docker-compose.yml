@@ -4,7 +4,7 @@ services:
     container_name: moduldev-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-course}
     volumes:
       - course_pgdata:/var/lib/postgresql/data
@@ -28,9 +28,9 @@ services:
     volumes:
       - ./Api/Migrations:/app/Migrations
     environment:
-      - ConnectionStrings__CourseDb=Host=postgres;Database=${POSTGRES_DB:-course};Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD}
+      - ConnectionStrings__CourseDb=Host=postgres;Database=${POSTGRES_DB:-course};Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:-postgres}
       - COURSE_JWT_SIGNING_KEY=${COURSE_JWT_SIGNING_KEY}
-      - COURSE_WORKFLOW_WORKER_PASSWORD=${COURSE_WORKFLOW_WORKER_PASSWORD}
+      - COURSE_WORKFLOW_WORKER_PASSWORD=${COURSE_WORKFLOW_WORKER_PASSWORD:-workflow_worker_pw}
     depends_on:
       postgres:
         condition: service_healthy
@@ -56,7 +56,7 @@ services:
       - COURSE_JWT_ISSUER=${COURSE_JWT_ISSUER}
       - COURSE_JWT_AUDIENCE=${COURSE_JWT_AUDIENCE}
       - COURSE_JWT_SIGNING_KEY=${COURSE_JWT_SIGNING_KEY}
-      - ConnectionStrings__CourseDb=Host=postgres;Database=${POSTGRES_DB:-course};Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD}
+      - ConnectionStrings__CourseDb=Host=postgres;Database=${POSTGRES_DB:-course};Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:-postgres}
     expose:
       - "8080"
     depends_on:
@@ -92,7 +92,7 @@ services:
       dockerfile: Workflow.Worker/Dockerfile
     container_name: moduldev-worker-a
     environment:
-      - ConnectionStrings__CourseDb=Host=postgres;Database=${POSTGRES_DB:-course};Username=workflow_worker;Password=${COURSE_WORKFLOW_WORKER_PASSWORD}
+      - ConnectionStrings__CourseDb=Host=postgres;Database=${POSTGRES_DB:-course};Username=workflow_worker;Password=${COURSE_WORKFLOW_WORKER_PASSWORD:-workflow_worker_pw}
       - COURSE_INSTANCE_ID=worker-a
       - COURSE_TEST_PROFILE=${COURSE_TEST_PROFILE:-0}
       - COURSE_FAILPOINT=${COURSE_FAILPOINT:-}
@@ -111,7 +111,7 @@ services:
       dockerfile: Workflow.Worker/Dockerfile
     container_name: moduldev-worker-b
     environment:
-      - ConnectionStrings__CourseDb=Host=postgres;Database=${POSTGRES_DB:-course};Username=workflow_worker;Password=${COURSE_WORKFLOW_WORKER_PASSWORD}
+      - ConnectionStrings__CourseDb=Host=postgres;Database=${POSTGRES_DB:-course};Username=workflow_worker;Password=${COURSE_WORKFLOW_WORKER_PASSWORD:-workflow_worker_pw}
       - COURSE_INSTANCE_ID=worker-b
       - COURSE_TEST_PROFILE=${COURSE_TEST_PROFILE:-0}
       - COURSE_FAILPOINT=${COURSE_FAILPOINT:-}
