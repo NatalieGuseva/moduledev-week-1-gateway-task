@@ -25,8 +25,7 @@ services:
     container_name: moduldev-cli
     command: ["migration", "apply", "/app/Migrations/ChecksummedMigrations"]
     restart: "no"
-    volumes:
-      - ./Api/Migrations:/app/Migrations
+    
     environment:
       - ConnectionStrings__CourseDb=Host=postgres;Database=${POSTGRES_DB:-course};Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:-postgres}
       - COURSE_JWT_SIGNING_KEY=${COURSE_JWT_SIGNING_KEY}
@@ -87,6 +86,7 @@ services:
     restart: unless-stopped
 
   worker-a:
+    image: moduledev-week2-worker:latest
     build:
       context: .
       dockerfile: Workflow.Worker/Dockerfile
@@ -106,6 +106,7 @@ services:
     restart: unless-stopped
 
   worker-b:
+    image: moduledev-week2-worker:latest
     build:
       context: .
       dockerfile: Workflow.Worker/Dockerfile
