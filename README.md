@@ -98,13 +98,7 @@ curl http://localhost:8080/health/ready
 curl http://localhost:8080/openapi/default.json
 curl http://localhost:8080/openapi/actions/payment/request/1.json
 
-Подключитесь к БД для Windows (Git Bash):
-
-winpty docker compose exec postgres psql -U postgres -d course
-
-Показать все таблицы в схеме course
-
-\dt course.*  
+docker compose exec postgres psql -U postgres -d course
 ```
 
 ### Ограничения
