@@ -113,6 +113,7 @@ winpty docker compose exec postgres psql -U postgres -d course
 - Только `POST` в обязательной части action manifest.
 - Rate limiting, CORS-трансформации и защитные очереди gateway не входят в неделю 1.
 
+
 ADR:
 - [ADR 001: Trust boundary](docs/001-trust-boundary.md)
 - [ADR 002: Технический и предметный результат](docs/002-technical-vs-domain-result.md)
