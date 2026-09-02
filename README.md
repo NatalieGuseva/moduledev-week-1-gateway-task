@@ -19,25 +19,36 @@
 
 ### Запуск
 
-Требования: Docker Desktop с Compose v2.20+ (нужна поддержка `service_completed_successfully`).
+#### Локальная разработка
 
-```bash
+**Требования:** Docker Desktop с Compose v2.20+ (нужна поддержка `service_completed_successfully`).
+
+1. Создайте файл `.env` в корне проекта:
+
+# PostgreSQL
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=your_password_here
+POSTGRES_DB=course
+
+# JWT (для локальной разработки)
+COURSE_JWT_ISSUER=moduledev-course
+COURSE_JWT_AUDIENCE=moduledev-api
+COURSE_JWT_SIGNING_KEY=your_signing_key_here_at_least_32_chars
+
+Заполните реальными значениями (для тестов можно использовать postgres и любую строку длиной 32+ символов)
+⚠️ Важно: .env не коммитится в репозиторий. Реальные секреты не должны попадать в Git. Для проверки система подставляет свои значения через Compose override.
+
+2. Запустите стек:
+
+bash
 docker compose up -d --build
-```
 
-Никаких ручных SQL-команд или публикации встроенных actions после чистого запуска не требуется — `cli` применяет миграции автоматически, `api` стартует только после их успешного завершения. Проверка доступности:
+3. Проверка доступности:
 
 ```bash
 curl http://localhost:8080/health/live
 curl http://localhost:8080/health/ready
 ```
-
-**Перед повторным запуском/проверкой** (в том числе перед `./check.sh`) обязательно гасите предыдущий стек, чтобы не занимать порт `8080`:
-
-```bash
-docker compose down -v
-```
-
 ### Конфигурация
 
 `api` и `cli` читают переменные окружения (реальные значения не хранятся в репозитории, задаются через `.env` или Compose override):
@@ -66,13 +77,13 @@ docker compose run --rm cli migration apply /app/Migrations/ChecksummedMigration
 Миграции выполняются в лексикографическом порядке файлов, каждая — в отдельной транзакции. Применённые файлы фиксируются по SHA-256 checksum в `course.schema_migrations`: повтор с тем же содержимым безопасен (skip), изменение уже применённого файла возвращает `manifest.conflict`. `api` migration credentials не использует.
 
 ### Проверка
+Важно: Перед запуском проверки обязательно освободите порт и очистите состояние предыдущего запуска:
 
 ```bash
-docker compose down -v   # освободить порт 8080 и убрать состояние прошлого запуска
+docker compose down -v
 ./check.sh
-```
 
-Дополнительно свои integration-тесты (при наличии) — раздел не заменяет `./check.sh`, а дополняет его.
+Результат записывается в week-1-public-report.json
 
 ### Диагностика
 

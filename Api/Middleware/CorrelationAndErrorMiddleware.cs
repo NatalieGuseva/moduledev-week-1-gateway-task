@@ -16,15 +16,20 @@ public class CorrelationAndErrorMiddleware
 
     public async Task InvokeAsync(HttpContext context)
     {
-        // 1. Извлекаем или генерируем Correlation ID
-        var correlationIdStr = context.Request.Headers["X-Correlation-ID"].FirstOrDefault();
-        if (!Guid.TryParse(correlationIdStr, out var correlationId) || correlationId == Guid.Empty)
-        {
-            correlationId = Guid.NewGuid();
-        }
-
+        // CorrelationId — доверенные метаданные для аудита (course.action_dispatches),
+        // поэтому формируются ТОЛЬКО сервером и никогда не принимаются от клиента:
+        // иначе вызывающая сторона могла бы подделать значение, попадающее в trusted-контекст.
+        var correlationId = Guid.NewGuid();
         context.Items["CorrelationId"] = correlationId;
         context.Response.Headers["X-Correlation-ID"] = correlationId.ToString();
+
+        // Если клиент прислал свой X-Correlation-ID для собственной трассировки — эхом
+        // возвращаем его отдельным заголовком, не смешивая с доверенным correlationId.
+        var clientCorrelationId = context.Request.Headers["X-Correlation-ID"].FirstOrDefault();
+        if (!string.IsNullOrEmpty(clientCorrelationId))
+        {
+            context.Response.Headers["X-Client-Correlation-ID"] = clientCorrelationId;
+        }
 
         try
         {

@@ -127,11 +127,24 @@ public class ActionsController : ControllerBase
                     }
                 }
 
+                bool idempotencyClaimed = false;
                 if (!string.IsNullOrEmpty(idempotencyKey))
                 {
-                    var existingRecord = await CheckIdempotencyAsync(connection, transaction, idempotencyKey, module, actionName, effectiveVersion, trustedContext.Principal);
-                    if (existingRecord != null)
+                    // Атомарно "застолбить" ключ ДО вызова target-функции. Если конфликт —
+                    // либо чужая транзакция ещё выполняется (наш INSERT заблокируется на
+                    // уникальном индексе до её commit/rollback), либо она уже завершилась.
+                    // В обоих случаях к моменту, когда мы получаем ответ, гонки уже нет.
+                    idempotencyClaimed = await ClaimIdempotencyAsync(connection, transaction, idempotencyKey, module, actionName, effectiveVersion, trustedContext.Principal, GetHash(rawPayload));
+
+                    if (!idempotencyClaimed)
                     {
+                        var existingRecord = await CheckIdempotencyAsync(connection, transaction, idempotencyKey, module, actionName, effectiveVersion, trustedContext.Principal);
+                        if (existingRecord == null)
+                        {
+                            await transaction.RollbackAsync(cancellationToken);
+                            return StatusCode(StatusCodes.Status500InternalServerError, CreateErrorEnvelope("internal.error", "Idempotency record vanished", correlationId, effectiveVersion));
+                        }
+
                         if (existingRecord.PayloadHash != GetHash(rawPayload))
                         {
                             await transaction.RollbackAsync(cancellationToken);
@@ -155,7 +168,16 @@ public class ActionsController : ControllerBase
                 };
 
                 var contextJson = JsonSerializer.Serialize(effectiveContext, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
-                var invokeResultJson = await InvokeApiFunctionAsync(connection, transaction, module, actionName, effectiveVersion, contextJson, rawPayload);
+                string invokeResultJson;
+                try
+                {
+                    invokeResultJson = await InvokeApiFunctionAsync(connection, transaction, module, actionName, effectiveVersion, contextJson, rawPayload, manifest.TimeoutMs, cancellationToken);
+                }
+                catch (TimeoutException)
+                {
+                    await transaction.RollbackAsync(cancellationToken);
+                    return StatusCode(StatusCodes.Status504GatewayTimeout, CreateErrorEnvelope("action.timeout", $"Target exceeded timeout_ms={manifest.TimeoutMs}", correlationId, effectiveVersion));
+                }
 
                 using var doc = JsonDocument.Parse(invokeResultJson);
                 var root = doc.RootElement;
@@ -245,9 +267,9 @@ public class ActionsController : ControllerBase
                     };
                     var finalSuccessJson = JsonSerializer.Serialize(finalSuccessResponse);
 
-                    if (!string.IsNullOrEmpty(idempotencyKey))
+                    if (idempotencyClaimed)
                     {
-                        await SaveIdempotencyAsync(connection, transaction, idempotencyKey, module, actionName, effectiveVersion, trustedContext.Principal, GetHash(rawPayload), finalSuccessJson);
+                        await CompleteIdempotencyAsync(connection, transaction, idempotencyKey!, module, actionName, effectiveVersion, trustedContext.Principal, finalSuccessJson);
                     }
 
                     await transaction.CommitAsync(cancellationToken);
@@ -336,11 +358,30 @@ public class ActionsController : ControllerBase
         return await conn.QueryFirstOrDefaultAsync<ActionManifestDb>(sql, new { module, action }, tx);
     }
 
-    private async Task<string> InvokeApiFunctionAsync(NpgsqlConnection conn, NpgsqlTransaction tx, string module, string action, int version, string contextJson, string payloadJson)
+    private async Task<string> InvokeApiFunctionAsync(NpgsqlConnection conn, NpgsqlTransaction tx, string module, string action, int version, string contextJson, string payloadJson, int timeoutMs, CancellationToken cancellationToken)
     {
         const string sql = "SELECT api.invoke(@module, @action, @version, @context::jsonb, @payload::jsonb)";
-        var res = await conn.ExecuteScalarAsync<string>(sql, new { module, action, version, context = contextJson, payload = payloadJson }, tx);
-        return res ?? "{}";
+        // timeout_ms манифеста должен реально ограничивать зависший target, а не быть
+        // декларативной цифрой в контракте: связываем его с CommandTimeout и с
+        // CancellationToken запроса, чтобы отмена сработала по любой из двух причин.
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        linkedCts.CancelAfter(TimeSpan.FromMilliseconds(timeoutMs));
+        var command = new CommandDefinition(
+            sql,
+            new { module, action, version, context = contextJson, payload = payloadJson },
+            tx,
+            commandTimeout: (int)Math.Ceiling(timeoutMs / 1000.0),
+            cancellationToken: linkedCts.Token);
+        try
+        {
+            var res = await conn.ExecuteScalarAsync<string>(command);
+            return res ?? "{}";
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            // Отмена сработала именно из-за timeout_ms манифеста, а не из-за отмены HTTP-запроса.
+            throw new TimeoutException($"Target function exceeded timeout_ms={timeoutMs}");
+        }
     }
 
     private async Task<IdempotencyRecordDb?> CheckIdempotencyAsync(NpgsqlConnection conn, NpgsqlTransaction tx, string key, string module, string action, int version, string principal)
@@ -352,13 +393,28 @@ public class ActionsController : ControllerBase
         return await conn.QueryFirstOrDefaultAsync<IdempotencyRecordDb>(sql, new { key, module, action, version, principal }, tx);
     }
 
-    private async Task SaveIdempotencyAsync(NpgsqlConnection conn, NpgsqlTransaction tx, string key, string module, string action, int version, string principal, string hash, string resultJson)
+    private async Task<bool> ClaimIdempotencyAsync(NpgsqlConnection conn, NpgsqlTransaction tx, string key, string module, string action, int version, string principal, string hash)
     {
+        // Плейсхолдер-строка со status='pending' и пустым result — застолбить ключ,
+        // пока целевой эффект ещё не выполнен. Уникальный индекс на
+        // (idempotency_key, module, action, version, principal) обеспечивает атомарность:
+        // конкурентный INSERT с тем же ключом заблокируется на этой строке до нашего commit/rollback.
         const string sql = @"
             INSERT INTO course.idempotency_records (idempotency_key, module, action, version, principal, payload_hash, result, status, created_at)
-            VALUES (@key, @module, @action, @version, @principal, @hash, @resultJson::jsonb, 'OK', NOW())
-            ON CONFLICT (idempotency_key, module, action, version, principal) DO NOTHING";
-        await conn.ExecuteAsync(sql, new { key, module, action, version, principal, hash, resultJson }, tx);
+            VALUES (@key, @module, @action, @version, @principal, @hash, '{}'::jsonb, 'pending', NOW())
+            ON CONFLICT (idempotency_key, module, action, version, principal) DO NOTHING
+            RETURNING id";
+        var claimedId = await conn.ExecuteScalarAsync<int?>(sql, new { key, module, action, version, principal, hash }, tx);
+        return claimedId.HasValue;
+    }
+
+    private async Task CompleteIdempotencyAsync(NpgsqlConnection conn, NpgsqlTransaction tx, string key, string module, string action, int version, string principal, string resultJson)
+    {
+        const string sql = @"
+            UPDATE course.idempotency_records
+            SET result = @resultJson::jsonb, status = 'OK'
+            WHERE idempotency_key = @key AND module = @module AND action = @action AND version = @version AND principal = @principal";
+        await conn.ExecuteAsync(sql, new { key, module, action, version, principal, resultJson }, tx);
     }
 
     private static string GetHash(string text)
