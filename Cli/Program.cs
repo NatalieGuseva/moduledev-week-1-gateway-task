@@ -105,7 +105,8 @@ class Program
                 @required_policy::jsonb,
                 @idempotency_mode,
                 @idempotency_scope,
-                @timeout_ms
+                @timeout_ms,
+                @enabled
             )";
 
         var result = await connection.ExecuteScalarAsync<string>(sql, new
@@ -122,7 +123,8 @@ class Program
             required_policy = JsonSerializer.Serialize(manifest.RequiredPolicy ?? Array.Empty<string>()),
             idempotency_mode = manifest.IdempotencyMode ?? "none",
             idempotency_scope = manifest.IdempotencyScope ?? "none",
-            timeout_ms = manifest.TimeoutMs ?? 30000
+            timeout_ms = manifest.TimeoutMs ?? 30000,
+            enabled = manifest.Enabled
         });
 
         Console.WriteLine(result);
@@ -631,6 +633,9 @@ class Program
         
         [JsonPropertyName("timeout_ms")]
         public int? TimeoutMs { get; set; }
+
+        [JsonPropertyName("enabled")]
+        public bool Enabled { get; set; } = true;
     }
 
     private class ActionItem
