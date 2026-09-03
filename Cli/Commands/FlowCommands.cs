@@ -1,7 +1,11 @@
+using System.Globalization;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using Dapper;
 using Npgsql;
+using YamlDotNet.Core;
+using YamlDotNet.RepresentationModel;
 
 namespace Cli.Commands;
 
@@ -534,25 +538,103 @@ public static class FlowCommands
         }
         catch (JsonException)
         {
+            string json;
             try
             {
-                var yamlDeserializer = new YamlDotNet.Serialization.DeserializerBuilder().Build();
-                var yamlObject = yamlDeserializer.Deserialize(new StringReader(rawContent));
+                json = ConvertYamlToJson(rawContent);
+            }
+            catch (Exception yamlEx)
+            {
+                return (null, null, $"map is not valid JSON or YAML: {yamlEx.Message}");
+            }
 
-                var yamlToJsonSerializer = new YamlDotNet.Serialization.SerializerBuilder()
-                    .JsonCompatible()
-                    .Build();
-                var json = yamlToJsonSerializer.Serialize(yamlObject);
-
+            try
+            {
                 var manifest = JsonSerializer.Deserialize<FlowManifest>(json, StrictManifestOptions);
                 if (manifest == null) return (null, null, "failed to parse map YAML");
                 return (manifest, json, null);
             }
-            catch (Exception yamlEx)
+            catch (JsonException jsonEx)
             {
-                return (null, null, $"map is not valid JSON or YAML, or contains unknown fields: {yamlEx.Message}");
+                return (null, null, $"map YAML does not match schema, or contains unknown fields: {jsonEx.Message}");
             }
         }
+    }
+
+    /// <summary>
+    /// Конвертирует YAML-документ в канонический JSON-текст напрямую по дереву
+    /// узлов (<see cref="YamlNode"/>), а не через промежуточный
+    /// Dictionary&lt;object, object&gt; + YamlDotNet "JsonCompatible" сериализатор.
+    /// Последний путь на практике ненадёжен для этой задачи: ключи маппингов
+    /// оказываются boxed-object, а типы скаляров (int/bool/null vs string)
+    /// приходится угадывать заново при повторной сериализации, из-за чего
+    /// семантически идентичная карта в YAML не проходила ту же строгую
+    /// JSON-схему, что и её JSON-двойник. Здесь тип каждого скаляра решается
+    /// один раз и явно, с уважением к исходному стилю кавычек.
+    /// </summary>
+    private static string ConvertYamlToJson(string yamlContent)
+    {
+        var yamlStream = new YamlStream();
+        yamlStream.Load(new StringReader(yamlContent));
+
+        if (yamlStream.Documents.Count == 0)
+            throw new InvalidOperationException("YAML document is empty");
+
+        var node = ConvertYamlNode(yamlStream.Documents[0].RootNode);
+        return node?.ToJsonString() ?? "null";
+    }
+
+    private static JsonNode? ConvertYamlNode(YamlNode node)
+    {
+        switch (node)
+        {
+            case YamlScalarNode scalar:
+                return ConvertYamlScalar(scalar);
+
+            case YamlSequenceNode sequence:
+                var array = new JsonArray();
+                foreach (var child in sequence.Children)
+                    array.Add(ConvertYamlNode(child));
+                return array;
+
+            case YamlMappingNode mapping:
+                var obj = new JsonObject();
+                foreach (var (keyNode, valueNode) in mapping.Children)
+                {
+                    if (keyNode is not YamlScalarNode keyScalar || keyScalar.Value == null)
+                        throw new InvalidOperationException("Map keys must be scalar strings");
+                    obj[keyScalar.Value] = ConvertYamlNode(valueNode);
+                }
+                return obj;
+
+            default:
+                throw new NotSupportedException($"Unsupported YAML node type: {node.NodeType}");
+        }
+    }
+
+    /// <summary>
+    /// A quoted scalar ("1", 'true') is always a string in YAML regardless of
+    /// what it looks like — only an unquoted (plain-style) scalar gets type
+    /// inference (null/bool/int/float, falling back to string).
+    /// </summary>
+    private static JsonNode? ConvertYamlScalar(YamlScalarNode scalar)
+    {
+        var value = scalar.Value;
+        if (value == null) return null;
+
+        if (scalar.Style != ScalarStyle.Plain)
+            return JsonValue.Create(value);
+
+        if (value.Length == 0 || value is "~" or "null" or "Null" or "NULL")
+            return null;
+        if (bool.TryParse(value, out var boolValue))
+            return JsonValue.Create(boolValue);
+        if (long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var longValue))
+            return JsonValue.Create(longValue);
+        if (double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var doubleValue))
+            return JsonValue.Create(doubleValue);
+
+        return JsonValue.Create(value);
     }
 
     private static async Task<NpgsqlConnection> OpenConnection()
