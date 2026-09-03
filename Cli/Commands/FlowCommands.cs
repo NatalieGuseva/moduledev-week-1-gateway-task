@@ -498,23 +498,57 @@ public static class FlowCommands
 
     private static async Task<(FlowManifest? Manifest, string? Error)> ReadManifest(string path)
     {
-        if (!File.Exists(path)) return (null, $"map file not found: {path}");
+        string rawContent;
 
+        // "/dev/stdin" (или "-") — карта подаётся через пайп, а не обычным файлом.
+        // File.Exists/File.ReadAllTextAsync ненадёжны для character-устройств,
+        // поэтому читаем явно через Console.In.
+        if (path == "/dev/stdin" || path == "-")
+        {
+            rawContent = await Console.In.ReadToEndAsync();
+        }
+        else
+        {
+            if (!File.Exists(path)) return (null, $"map file not found: {path}");
+            rawContent = await File.ReadAllTextAsync(path);
+        }
+
+        if (string.IsNullOrWhiteSpace(rawContent))
+        {
+            return (null, "map content is empty");
+        }
+
+        // Формат не различаем по расширению (для stdin его и нет) — пробуем как JSON,
+        // и только если это не сработало из-за синтаксиса (а не из-за неизвестных полей,
+        // которые обязаны быть отклонены как есть), пробуем разобрать как YAML и
+        // конвертировать в JSON тем же путём, чтобы дальше действовала одна и та же
+        // строгая проверка схемы (UnmappedMemberHandling.Disallow).
         try
         {
-            var json = await File.ReadAllTextAsync(path);
-            // UnmappedMemberHandling.Disallow — лишние/неизвестные поля где угодно
-            // в манифесте (в т.ч. на верхнем уровне) должны быть отклонены, а не
-            // молча проигнорированы: это отдельный пункт semantic-валидации
-            // ("no unknown fields per JSON Schema course-1"), а не только
-            // структурная схема.
-            var manifest = JsonSerializer.Deserialize<FlowManifest>(json, StrictManifestOptions);
+            var manifest = JsonSerializer.Deserialize<FlowManifest>(rawContent, StrictManifestOptions);
             if (manifest == null) return (null, "failed to parse map JSON");
             return (manifest, null);
         }
-        catch (JsonException ex)
+        catch (JsonException)
         {
-            return (null, $"map is not valid JSON or contains unknown fields: {ex.Message}");
+            try
+            {
+                var yamlDeserializer = new YamlDotNet.Serialization.DeserializerBuilder().Build();
+                var yamlObject = yamlDeserializer.Deserialize(new StringReader(rawContent));
+
+                var yamlToJsonSerializer = new YamlDotNet.Serialization.SerializerBuilder()
+                    .JsonCompatible()
+                    .Build();
+                var json = yamlToJsonSerializer.Serialize(yamlObject);
+
+                var manifest = JsonSerializer.Deserialize<FlowManifest>(json, StrictManifestOptions);
+                if (manifest == null) return (null, "failed to parse map YAML");
+                return (manifest, null);
+            }
+            catch (Exception yamlEx)
+            {
+                return (null, $"map is not valid JSON or YAML, or contains unknown fields: {yamlEx.Message}");
+            }
         }
     }
 
