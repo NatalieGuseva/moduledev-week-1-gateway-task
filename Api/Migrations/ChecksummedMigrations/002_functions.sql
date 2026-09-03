@@ -522,7 +522,9 @@ CREATE OR REPLACE FUNCTION course.publish_action(
     p_required_policy JSONB,
     p_idempotency_mode TEXT,
     p_idempotency_scope TEXT,
-    p_timeout_ms INTEGER
+    p_timeout_ms INTEGER,
+    p_enabled BOOLEAN DEFAULT TRUE
+
 ) RETURNS JSONB
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -548,7 +550,7 @@ BEGIN
         OR v_existing.required_policy   IS DISTINCT FROM p_required_policy
         OR v_existing.idempotency_mode  IS DISTINCT FROM p_idempotency_mode
         OR v_existing.idempotency_scope IS DISTINCT FROM p_idempotency_scope
-        OR v_existing.timeout_ms        IS DISTINCT FROM p_timeout_ms
+        OR v_existing.enabled           IS DISTINCT FROM p_enabled
         THEN
             RETURN jsonb_build_object(
                 'status', 'error',
@@ -588,7 +590,7 @@ BEGIN
         p_request_schema, p_response_schema, p_outcomes,
         p_required_policy, p_idempotency_mode, p_idempotency_scope,
         p_timeout_ms,
-        TRUE,
+        p_enabled,
         v_is_first_version
     );
 
