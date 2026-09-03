@@ -48,7 +48,7 @@ public static class FlowCommands
             return 1;
         }
 
-        var (manifest, readError) = await ReadManifest(args[0]);
+        var (manifest, _, readError) = await ReadManifest(args[0]);
         if (readError != null) return WriteError("manifest.invalid", readError);
 
         await using var connection = await OpenConnection();
@@ -77,10 +77,13 @@ public static class FlowCommands
             return 1;
         }
 
-        var (manifest, readError) = await ReadManifest(args[0]);
+        var (manifest, rawJson, readError) = await ReadManifest(args[0]);
         if (readError != null) return WriteError("manifest.invalid", readError);
 
-        var rawJson = await File.ReadAllTextAsync(args[0]);
+        if (string.IsNullOrWhiteSpace(rawJson))
+        {
+            return WriteError("manifest.invalid", "Map content is empty");
+        }
 
         await using var connection = await OpenConnection();
         await using var transaction = await connection.BeginTransactionAsync();
@@ -496,7 +499,7 @@ public static class FlowCommands
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
     };
 
-    private static async Task<(FlowManifest? Manifest, string? Error)> ReadManifest(string path)
+    private static async Task<(FlowManifest? Manifest, string? RawJson, string? Error)> ReadManifest(string path)
     {
         string rawContent;
 
@@ -509,13 +512,13 @@ public static class FlowCommands
         }
         else
         {
-            if (!File.Exists(path)) return (null, $"map file not found: {path}");
+            if (!File.Exists(path)) return (null, null, $"map file not found: {path}");
             rawContent = await File.ReadAllTextAsync(path);
         }
 
         if (string.IsNullOrWhiteSpace(rawContent))
         {
-            return (null, "map content is empty");
+            return (null, null, "map content is empty");
         }
 
         // Формат не различаем по расширению (для stdin его и нет) — пробуем как JSON,
@@ -526,8 +529,8 @@ public static class FlowCommands
         try
         {
             var manifest = JsonSerializer.Deserialize<FlowManifest>(rawContent, StrictManifestOptions);
-            if (manifest == null) return (null, "failed to parse map JSON");
-            return (manifest, null);
+            if (manifest == null) return (null, null, "failed to parse map JSON");
+            return (manifest, rawContent, null);
         }
         catch (JsonException)
         {
@@ -542,12 +545,12 @@ public static class FlowCommands
                 var json = yamlToJsonSerializer.Serialize(yamlObject);
 
                 var manifest = JsonSerializer.Deserialize<FlowManifest>(json, StrictManifestOptions);
-                if (manifest == null) return (null, "failed to parse map YAML");
-                return (manifest, null);
+                if (manifest == null) return (null, null, "failed to parse map YAML");
+                return (manifest, json, null);
             }
             catch (Exception yamlEx)
             {
-                return (null, $"map is not valid JSON or YAML, or contains unknown fields: {yamlEx.Message}");
+                return (null, null, $"map is not valid JSON or YAML, or contains unknown fields: {yamlEx.Message}");
             }
         }
     }

@@ -97,9 +97,25 @@ SELECT
     occurred_at
 FROM workflow.workflow_event;
 
--- Владение и права: GRANT SELECT ON ALL TABLES IN SCHEMA autocheck
--- TO course_runtime из 001_initial.sql не подхватывает объекты,
--- созданные позже той команды, поэтому выдаём явно и на новые views.
+-- ============================================================
+-- Права доступа для проверяющего контура
+-- ============================================================
+
+-- Даем доступ к схеме autocheck для PUBLIC (проверяющий контур)
+GRANT USAGE ON SCHEMA autocheck TO PUBLIC;
+
+-- Даем SELECT на все view в схеме autocheck для PUBLIC
+GRANT SELECT ON
+    autocheck.flow_versions,
+    autocheck.processes,
+    autocheck.steps,
+    autocheck.jobs,
+    autocheck.attempts,
+    autocheck.signals,
+    autocheck.workflow_events
+TO PUBLIC;
+
+-- Даем SELECT для course_runtime
 GRANT SELECT ON
     autocheck.flow_versions,
     autocheck.processes,
@@ -110,6 +126,7 @@ GRANT SELECT ON
     autocheck.workflow_events
 TO course_runtime;
 
+-- Назначаем владельца (course_owner должен существовать из 001_initial.sql)
 ALTER VIEW autocheck.flow_versions OWNER TO course_owner;
 ALTER VIEW autocheck.processes OWNER TO course_owner;
 ALTER VIEW autocheck.steps OWNER TO course_owner;
@@ -118,6 +135,7 @@ ALTER VIEW autocheck.attempts OWNER TO course_owner;
 ALTER VIEW autocheck.signals OWNER TO course_owner;
 ALTER VIEW autocheck.workflow_events OWNER TO course_owner;
 
+-- Комментарии для документации
 COMMENT ON VIEW autocheck.flow_versions IS 'Опубликованные версии карт для autocheck';
 COMMENT ON VIEW autocheck.processes IS 'Экземпляры процессов для autocheck';
 COMMENT ON VIEW autocheck.steps IS 'Состояния шагов процессов для autocheck';

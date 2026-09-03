@@ -1,5 +1,6 @@
 using Dapper;
 using Npgsql;
+using System.Text.Json;
 
 namespace Cli.Commands;
 
@@ -15,14 +16,6 @@ namespace Cli.Commands;
 /// на каждый outcome (action/manual/wait_signal), отсутствие transitions
 /// из end, базовая корректность JSON Pointer mapping и его непересечение,
 /// длина delays_ms.
-///
-/// НЕ покрывает (сознательно упрощено — если понадобится, расширять
-/// отдельно): достаточность server-side scopes "workflow-worker" сверх
-/// точного равенства политик (assignment требует ещё и её отдельно —
-/// здесь это не проверяется), полную RFC 6901 семантику JSON Pointer
-/// (спецсимволы ~0/~1 не разэкранируются, сравнение идёт по сырым
-/// сегментам, что покрывает подавляющее большинство реальных карт, но
-/// не 100% случаев экранирования).
 /// </summary>
 public static class FlowValidator
 {
@@ -54,11 +47,6 @@ public static class FlowValidator
             if (!stepsByKey.TryAdd(step.Key, step))
                 errors.Add($"duplicate step key '{step.Key}'");
         }
-
-        // Дальше многое зависит от того, что шаги хотя бы синтаксически
-        // валидны — если тут уже есть ошибки, дальнейший граф-анализ
-        // может давать шум поверх основной проблемы, но не останавливаемся:
-        // лучше показать разработчику максимум сразу.
 
         // --- ровно один существующий start_step ---
         if (string.IsNullOrEmpty(manifest.StartStep))
@@ -124,7 +112,7 @@ public static class FlowValidator
             errors.Add("no 'end' step is reachable from start_step");
 
         // --- отсутствие циклов (DFS с трёхцветной раскраской) ---
-        var color = new Dictionary<string, int>(); // 0=white,1=gray,2=black
+        var color = new Dictionary<string, int>(); // 0=white, 1=gray, 2=black
         bool hasCycle = false;
         void Dfs(string key)
         {
@@ -256,8 +244,8 @@ public static class FlowValidator
             errors.Add($"step '{step.Key}': referenced action {task.Module}.{task.Action}@{task.ActionVersion} is not enabled");
         }
 
-        var actionOutcomes = System.Text.Json.JsonSerializer.Deserialize<List<string>>(actionRow.OutcomesJson) ?? new();
-        var actionPolicy = System.Text.Json.JsonSerializer.Deserialize<List<string>>(actionRow.RequiredPolicyJson) ?? new();
+        var actionOutcomes = JsonSerializer.Deserialize<List<string>>(actionRow.OutcomesJson) ?? new();
+        var actionPolicy = JsonSerializer.Deserialize<List<string>>(actionRow.RequiredPolicyJson) ?? new();
 
         if (!actionPolicy.ToHashSet().SetEquals(task.RequiredPolicy.ToHashSet()))
         {
@@ -273,28 +261,29 @@ public static class FlowValidator
     private static void ValidateMapping(string stepKey, FlowTask task, List<string> errors)
     {
         var targetPointers = new List<string>(task.InputMapping.Keys);
+        var constantPointers = new List<string>();
 
+        // Собираем все пути из input_constants (рекурсивно)
+        if (task.InputConstants.ValueKind == JsonValueKind.Object)
+        {
+            CollectConstantPointers(task.InputConstants, "", constantPointers);
+        }
+
+        // Проверка, что все target pointers начинаются с '/'
         foreach (var pointer in targetPointers)
         {
             if (!pointer.StartsWith('/'))
                 errors.Add($"step '{stepKey}': input_mapping target pointer '{pointer}' must start with '/'");
         }
+
+        // Проверка, что все source pointers начинаются с '/'
         foreach (var source in task.InputMapping.Values)
         {
             if (!source.StartsWith('/'))
                 errors.Add($"step '{stepKey}': input_mapping source pointer '{source}' must start with '/'");
         }
 
-        // input_constants — плоский объект; его top-level ключи занимают
-        // те же целевые позиции payload'а, что и mapping, поэтому участвуют
-        // в той же проверке непересечения.
-        var constantPointers = new List<string>();
-        if (task.InputConstants.ValueKind == System.Text.Json.JsonValueKind.Object)
-        {
-            foreach (var prop in task.InputConstants.EnumerateObject())
-                constantPointers.Add("/" + prop.Name);
-        }
-
+        // Проверка на пересечение всех target pointers (mapping + constants)
         var allTargets = targetPointers.Concat(constantPointers).ToList();
         for (int i = 0; i < allTargets.Count; i++)
         {
@@ -307,10 +296,40 @@ public static class FlowValidator
     }
 
     /// <summary>
+    /// Рекурсивно собирает все JSON Pointer пути из объекта input_constants.
+    /// </summary>
+    private static void CollectConstantPointers(JsonElement element, string prefix, List<string> pointers)
+    {
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Object:
+                foreach (var prop in element.EnumerateObject())
+                {
+                    var path = prefix + "/" + prop.Name;
+                    pointers.Add(path);
+                    CollectConstantPointers(prop.Value, path, pointers);
+                }
+                break;
+            case JsonValueKind.Array:
+                int index = 0;
+                foreach (var item in element.EnumerateArray())
+                {
+                    var path = prefix + "/" + index;
+                    pointers.Add(path);
+                    CollectConstantPointers(item, path, pointers);
+                    index++;
+                }
+                break;
+            // Примитивы (string, number, boolean, null) — сам путь уже добавлен родителем
+            default:
+                break;
+        }
+    }
+
+    /// <summary>
     /// Пересечением считается равенство или отношение предок/потомок по
-    /// сегментам JSON Pointer: "/a" пересекается с "/a/b", но не с "/ab"
-    /// (04_assignment.md, раздел Mapping). Сравнение по сырым сегментам,
-    /// без RFC 6901 unescaping ~0/~1 — упрощение, см. класс-комментарий.
+    /// сегментам JSON Pointer: "/a" пересекается с "/a/b", но не с "/ab".
+    /// Сравнение по сырым сегментам, без RFC 6901 unescaping ~0/~1.
     /// </summary>
     private static bool PointersOverlap(string a, string b)
     {
