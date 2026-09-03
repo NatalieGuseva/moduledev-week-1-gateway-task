@@ -75,13 +75,30 @@ public class StepRunner
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
+        // claim_jobs уже сделал JOIN до course.action_catalog и вернул всё
+        // нужное манифесту одним вызовом — workflow_worker не имеет и не
+        // должен иметь GRANT на прямое чтение этой таблицы (только 4 EXECUTE,
+        // см. 007_workflow_functions.sql), поэтому передаём манифест сюда,
+        // а не даём ActionExecutor'у самому его резолвить через SQL.
+        var manifest = new ActionManifest
+        {
+            Module = job.ActionModule,
+            Action = job.ActionName,
+            Version = job.ActionVersion,
+            RequestSchema = job.RequestSchema,
+            ResponseSchema = job.ResponseSchema,
+            OutcomesJson = job.Outcomes,
+            RequiredPolicy = job.RequiredPolicy,
+            TimeoutMs = job.TimeoutMs ?? 30000
+        };
+
         ActionExecutionResult result;
         try
         {
             result = await _actionExecutor.ExecuteAsync(
                 connection, transaction, job.ActionModule, job.ActionName, job.ActionVersion,
                 trustedContext, payload.ToJsonString(), idempotencyKey: job.ExecutionId.ToString(), cancellationToken,
-                timeoutMsOverride: job.TimeoutMs);
+                timeoutMsOverride: job.TimeoutMs, preResolvedManifest: manifest, useIdempotencyStore: false);
         }
         catch (Exception ex)
         {

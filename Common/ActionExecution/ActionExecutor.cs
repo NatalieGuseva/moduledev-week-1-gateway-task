@@ -40,9 +40,19 @@ public class ActionExecutor
         string rawPayloadJson,
         string? idempotencyKey,
         CancellationToken cancellationToken,
-        int? timeoutMsOverride = null)
+        int? timeoutMsOverride = null,
+        ActionManifest? preResolvedManifest = null,
+        bool useIdempotencyStore = true)
     {
-        var manifest = await ResolveManifestAsync(connection, transaction, module, actionName, requestedVersion);
+        // Api/cli подключаются "широкой" учётной записью и могут читать
+        // course.action_catalog напрямую. Workflow.Worker — нет: он живёт под
+        // ограниченной ролью workflow_worker без единого табличного GRANT.
+        // Поэтому workflow.claim_jobs заранее джойнит action_catalog и отдаёт
+        // все нужные поля манифеста одним вызовом (см. комментарий в
+        // 007_workflow_functions.sql) — вызывающая сторона передаёт их сюда
+        // через preResolvedManifest вместо повторного (и для worker'а —
+        // невозможного из-за прав) чтения таблицы.
+        var manifest = preResolvedManifest ?? await ResolveManifestAsync(connection, transaction, module, actionName, requestedVersion);
         if (manifest == null)
         {
             return ActionExecutionResult.Failure(
@@ -105,7 +115,16 @@ public class ActionExecutor
             }
         }
 
-        if (!string.IsNullOrEmpty(idempotencyKey))
+        // useIdempotencyStore=false (Workflow.Worker): course.idempotency_records
+        // требует табличный GRANT, которого у ограниченной роли workflow_worker
+        // нет и не должно быть (см. 007_workflow_functions.sql — только 4 EXECUTE).
+        // Это не ослабляет гарантию "один предметный эффект": она обеспечивается
+        // на уровне самой карты — RequestId эффективного context'а не меняется
+        // между попытками ОДНОГО job'а (= job.ExecutionId), и целевые
+        // action-функции (например course.payment_request) сами дедуплицируют
+        // по этому requestId через свой собственный unique-constraint/replay —
+        // так же, как для обычного HTTP-вызова с тем же Idempotency-Key.
+        if (!string.IsNullOrEmpty(idempotencyKey) && useIdempotencyStore)
         {
             var existingRecord = await CheckIdempotencyAsync(
                 connection, transaction, idempotencyKey, module, actionName, effectiveVersion, trustedContext.Principal);
@@ -229,7 +248,7 @@ public class ActionExecutor
         };
         var finalSuccessJson = JsonSerializer.Serialize(finalSuccessResponse);
 
-        if (!string.IsNullOrEmpty(idempotencyKey))
+        if (!string.IsNullOrEmpty(idempotencyKey) && useIdempotencyStore)
         {
             await SaveIdempotencyAsync(
                 connection, transaction, idempotencyKey, module, actionName, effectiveVersion,
