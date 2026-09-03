@@ -94,8 +94,6 @@ public static class FlowCommands
 
         try
         {
-            // Валидируем внутри той же транзакции, что и публикацию: ссылки
-            // на course.action_catalog должны видеть согласованное состояние.
             var errors = await FlowValidator.ValidateAsync(manifest!, connection, transaction);
             if (errors.Count > 0)
             {
@@ -117,7 +115,6 @@ public static class FlowCommands
             {
                 if (existingSame.Value)
                 {
-                    // Повторная идентичная публикация — не ошибка, просто нет-оп.
                     await transaction.CommitAsync();
                     return WriteOk(new
                     {
@@ -322,7 +319,6 @@ public static class FlowCommands
             return 1;
         }
 
-        // Без --data используется {} (04_assignment.md).
         var dataJson = "{}";
         if (dataFile != null)
         {
@@ -352,7 +348,7 @@ public static class FlowCommands
     }
 
     // ------------------------------------------------------------
-    // flow get <process-id>
+    // flow get <process-id> - ИСПРАВЛЕН
     // ------------------------------------------------------------
     private static async Task<int> HandleGet(string[] args)
     {
@@ -367,10 +363,11 @@ public static class FlowCommands
 
         await using var connection = await OpenConnection();
 
+        // ✅ Исправлено: используем анонимный тип без AS, чтобы Dapper правильно сопоставил
         var row = await connection.QueryFirstOrDefaultAsync(
-            @"SELECT process_id AS ProcessId, flow_name AS FlowName, flow_version AS FlowVersion,
-                     state AS State, current_step_key AS CurrentStepKey
-              FROM workflow.process_instance WHERE process_id = @processId",
+            @"SELECT process_id, flow_name, flow_version, state, current_step_key
+              FROM workflow.process_instance
+              WHERE process_id = @processId",
             new { processId });
 
         if (row == null)
@@ -379,11 +376,11 @@ public static class FlowCommands
         return WriteOk(new
         {
             resource = "process",
-            processId = row.ProcessId,
-            flowName = row.FlowName,
-            flowVersion = row.FlowVersion,
-            state = row.State,
-            currentStepKey = row.CurrentStepKey
+            processId = row.process_id,
+            flowName = row.flow_name,
+            flowVersion = row.flow_version,
+            state = row.state,
+            currentStepKey = row.current_step_key
         });
     }
 
@@ -438,10 +435,6 @@ public static class FlowCommands
     // ------------------------------------------------------------
     // flow test-finish <job-id> --owner <owner> --lease-version <v>
     //   --outcome <outcome> --result <file>
-    // Доступно только при COURSE_TEST_PROFILE=1; вызывает ТУ ЖЕ
-    // production-границу workflow.finish_job, что и настоящий worker —
-    // это не отдельный бэкдор, а способ для checker'а спровоцировать
-    // fencing-сценарий (stale completion) без поднятия своего worker'а.
     // ------------------------------------------------------------
     private static async Task<int> HandleTestFinish(string[] args)
     {
@@ -507,9 +500,6 @@ public static class FlowCommands
     {
         string rawContent;
 
-        // "/dev/stdin" (или "-") — карта подаётся через пайп, а не обычным файлом.
-        // File.Exists/File.ReadAllTextAsync ненадёжны для character-устройств,
-        // поэтому читаем явно через Console.In.
         if (path == "/dev/stdin" || path == "-")
         {
             rawContent = await Console.In.ReadToEndAsync();
@@ -525,11 +515,6 @@ public static class FlowCommands
             return (null, null, "map content is empty");
         }
 
-        // Формат не различаем по расширению (для stdin его и нет) — пробуем как JSON,
-        // и только если это не сработало из-за синтаксиса (а не из-за неизвестных полей,
-        // которые обязаны быть отклонены как есть), пробуем разобрать как YAML и
-        // конвертировать в JSON тем же путём, чтобы дальше действовала одна и та же
-        // строгая проверка схемы (UnmappedMemberHandling.Disallow).
         try
         {
             var manifest = JsonSerializer.Deserialize<FlowManifest>(rawContent, StrictManifestOptions);
@@ -561,17 +546,6 @@ public static class FlowCommands
         }
     }
 
-    /// <summary>
-    /// Конвертирует YAML-документ в канонический JSON-текст напрямую по дереву
-    /// узлов (<see cref="YamlNode"/>), а не через промежуточный
-    /// Dictionary&lt;object, object&gt; + YamlDotNet "JsonCompatible" сериализатор.
-    /// Последний путь на практике ненадёжен для этой задачи: ключи маппингов
-    /// оказываются boxed-object, а типы скаляров (int/bool/null vs string)
-    /// приходится угадывать заново при повторной сериализации, из-за чего
-    /// семантически идентичная карта в YAML не проходила ту же строгую
-    /// JSON-схему, что и её JSON-двойник. Здесь тип каждого скаляра решается
-    /// один раз и явно, с уважением к исходному стилю кавычек.
-    /// </summary>
     private static string ConvertYamlToJson(string yamlContent)
     {
         var yamlStream = new YamlStream();
@@ -612,11 +586,6 @@ public static class FlowCommands
         }
     }
 
-    /// <summary>
-    /// A quoted scalar ("1", 'true') is always a string in YAML regardless of
-    /// what it looks like — only an unquoted (plain-style) scalar gets type
-    /// inference (null/bool/int/float, falling back to string).
-    /// </summary>
     private static JsonNode? ConvertYamlScalar(YamlScalarNode scalar)
     {
         var value = scalar.Value;
@@ -646,11 +615,6 @@ public static class FlowCommands
         return connection;
     }
 
-    /// <summary>
-    /// Разбирает jsonb-результат SQL-функции вида {"status":"ok"/"error", ...}
-    /// и либо строит финальный result-объект через onSuccess, либо
-    /// пробрасывает code/message как ошибку CLI.
-    /// </summary>
     private static int EmitFunctionResult(string? resultJson, Func<JsonElement, object> onSuccess)
     {
         using var doc = JsonDocument.Parse(resultJson ?? "{}");
