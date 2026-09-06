@@ -166,12 +166,26 @@ AS $$
 DECLARE
     v_job_ids UUID[];
 BEGIN
+    -- Кандидаты на захват — это не только READY/RETRY_WAIT: LEASED job,
+    -- чей lease_until уже в прошлом, тоже обязан быть реклеймлен другим
+    -- (или тем же) worker'ом. Раньше сюда попадали только READY/RETRY_WAIT,
+    -- из-за чего job, чей владелец умер между claim и finish/fail (failpoint,
+    -- kill -9), оставался в LEASED навсегда — никто и никогда не забирал
+    -- его снова, finish_job/fail_job лишь ОТКЛОНЯЛИ запоздалый ответ
+    -- прежнего владельца, но сами не возвращали job в оборот.
     SELECT array_agg(candidate.job_id) INTO v_job_ids
     FROM (
         SELECT j.job_id
         FROM workflow.workflow_job j
-        WHERE j.state IN ('READY', 'RETRY_WAIT')
-          AND (j.next_attempt_at IS NULL OR j.next_attempt_at <= now())
+        WHERE (
+                j.state IN ('READY', 'RETRY_WAIT')
+                AND (j.next_attempt_at IS NULL OR j.next_attempt_at <= now())
+              )
+           OR (
+                j.state = 'LEASED'
+                AND j.lease_until IS NOT NULL
+                AND j.lease_until < now()
+              )
         ORDER BY j.next_attempt_at NULLS FIRST, j.created_at
         FOR UPDATE SKIP LOCKED
         LIMIT p_limit
@@ -180,6 +194,20 @@ BEGIN
     IF v_job_ids IS NULL THEN
         RETURN; -- нечего отдавать этому worker'у прямо сейчас
     END IF;
+
+    -- Если среди захватываемых job'ов есть реклейм протухшего LEASED —
+    -- предыдущая попытка (ещё формально 'RUNNING') больше никогда не будет
+    -- закрыта своим воркером (он мёртв/завис на failpoint) — помечаем её
+    -- STALE тем же способом, что finish_job/fail_job делают при запоздалом
+    -- ответе, чтобы в task_attempt не оставалось вечно висящих RUNNING строк.
+    UPDATE workflow.task_attempt ta
+    SET status = 'STALE', finished_at = now()
+    FROM workflow.workflow_job j
+    WHERE ta.job_id = j.job_id
+      AND j.job_id = ANY(v_job_ids)
+      AND j.state = 'LEASED'
+      AND ta.lease_version = j.lease_version
+      AND ta.status = 'RUNNING';
 
     UPDATE workflow.workflow_job j
     SET state = 'LEASED',
@@ -282,7 +310,11 @@ BEGIN
     SELECT * INTO v_step FROM workflow.step_instance WHERE step_instance_id = v_job.step_instance_id FOR UPDATE;
     SELECT * INTO v_process FROM workflow.process_instance WHERE process_id = v_job.process_id FOR UPDATE;
 
-    UPDATE workflow.workflow_job SET state = 'SUCCEEDED' WHERE job_id = p_job_id;
+    -- attempt_count должен отражать реальное число попыток (как и на
+    -- retry-ветке в fail_job) — иначе при успехе с первой попытки
+    -- job.attempt_count остаётся 0, а task_attempt уже содержит 1
+    -- строку: их количества расходятся.
+    UPDATE workflow.workflow_job SET state = 'SUCCEEDED', attempt_count = attempt_count + 1 WHERE job_id = p_job_id;
 
     UPDATE workflow.task_attempt
     SET status = 'SUCCEEDED', outcome = p_outcome, result = p_result, finished_at = now()
@@ -306,6 +338,11 @@ BEGIN
         -- результат выше, но дальше маршрут вести некуда — это дефект
         -- карты/контракта action'а, а не переходное состояние, поэтому
         -- переводим процесс в FAILED, а не оставляем его подвешенным.
+        -- Job тоже терминальный: раз маршрута дальше нет, "SUCCEEDED"
+        -- (проставленный выше как факт исполнения) вводит в заблуждение —
+        -- с точки зрения процесса это несостоявшийся шаг, поэтому job
+        -- переводим в DEAD, а не оставляем в SUCCEEDED.
+        UPDATE workflow.workflow_job SET state = 'DEAD' WHERE job_id = p_job_id;
         UPDATE workflow.process_instance SET state = 'FAILED', updated_at = now()
             WHERE process_id = v_process.process_id;
         INSERT INTO workflow.workflow_event (process_id, step_instance_id, event_type)
@@ -392,7 +429,7 @@ BEGIN
     -- обязательное событие TaskFailed (единственное имя события,
     -- жёстко зафиксированное заданием).
     IF (NOT p_retryable) OR (v_job.attempt_count + 1 >= v_task_def.max_attempts) THEN
-        UPDATE workflow.workflow_job SET state = 'DEAD' WHERE job_id = p_job_id;
+        UPDATE workflow.workflow_job SET state = 'DEAD', attempt_count = attempt_count + 1 WHERE job_id = p_job_id;
         UPDATE workflow.step_instance SET state = 'FAILED', completed_at = now()
             WHERE step_instance_id = v_step.step_instance_id;
         UPDATE workflow.process_instance SET state = 'FAILED', updated_at = now()
@@ -454,7 +491,21 @@ BEGIN
         );
     END IF;
 
-    SELECT to_jsonb(pi.*) INTO v_process
+    -- ВАЖНО: собираем объект вручную, а не через to_jsonb(pi.*) —
+    -- колонки таблицы snake_case (process_id, business_key, ...), а
+    -- контракт action'а (как и flow get у CLI) отдаёт camelCase.
+    -- to_jsonb(pi.*) тут раньше молча ломал processId в ответе.
+    SELECT jsonb_build_object(
+        'processId', pi.process_id,
+        'businessKey', pi.business_key,
+        'flowName', pi.flow_name,
+        'flowVersion', pi.flow_version,
+        'state', pi.state,
+        'currentStepKey', pi.current_step_key,
+        'processData', pi.process_data,
+        'createdAt', pi.created_at,
+        'updatedAt', pi.updated_at
+    ) INTO v_process
     FROM workflow.process_instance pi
     WHERE pi.process_id = v_process_id;
 
