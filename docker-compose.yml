@@ -1,11 +1,15 @@
 services:
   postgres:
-    image: postgres:17-alpine
+    build:
+      context: .
+      dockerfile: postgres/Dockerfile
     container_name: moduldev-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-course}
+      COURSE_MIGRATOR_PASSWORD: ${COURSE_MIGRATOR_PASSWORD:-course_migrator_pw}
+      COURSE_PUBLISHER_PASSWORD: ${COURSE_PUBLISHER_PASSWORD:-course_publisher_pw}
     volumes:
       - course_pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -17,7 +21,6 @@ services:
       - moduldev-network
     restart: unless-stopped
 
-
   cli:
     build:
       context: .
@@ -25,7 +28,6 @@ services:
     container_name: moduldev-cli
     command: ["migration", "apply", "/app/Migrations/ChecksummedMigrations"]
     restart: "no"
-    
     environment:
       - ConnectionStrings__CourseDb=Host=postgres;Database=${POSTGRES_DB:-course};Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:-postgres}
       - COURSE_JWT_SIGNING_KEY=${COURSE_JWT_SIGNING_KEY}
@@ -48,13 +50,13 @@ services:
       interval: 10s
       timeout: 5s
       retries: 20
-      #start_period: 30s
     environment:
       - ASPNETCORE_ENVIRONMENT=Production
       - ASPNETCORE_URLS=http://0.0.0.0:8080
       - COURSE_JWT_ISSUER=${COURSE_JWT_ISSUER}
       - COURSE_JWT_AUDIENCE=${COURSE_JWT_AUDIENCE}
       - COURSE_JWT_SIGNING_KEY=${COURSE_JWT_SIGNING_KEY}
+      - PROVIDER_HMAC_SECRET=${PROVIDER_HMAC_SECRET}
       - ConnectionStrings__CourseDb=Host=postgres;Database=${POSTGRES_DB:-course};Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:-postgres}
     expose:
       - "8080"
@@ -73,7 +75,7 @@ services:
       dockerfile: Gateway/Dockerfile
     container_name: moduldev-gateway
     ports:
-      - "8080:8080"
+      - "127.0.0.1:${COURSE_GATEWAY_PORT:-8080}:8080"
     environment:
       - ASPNETCORE_ENVIRONMENT=Production
       - ASPNETCORE_URLS=http://0.0.0.0:8080
@@ -94,7 +96,7 @@ services:
     environment:
       - ConnectionStrings__CourseDb=Host=postgres;Database=${POSTGRES_DB:-course};Username=workflow_worker;Password=${COURSE_WORKFLOW_WORKER_PASSWORD:-workflow_worker_pw}
       - COURSE_INSTANCE_ID=worker-a
-      - COURSE_TEST_PROFILE=${COURSE_TEST_PROFILE:-0}
+      - COURSE_TEST_PROFILE=${COURSE_TEST_PROFILE:-1}
       - COURSE_FAILPOINT=${COURSE_FAILPOINT:-}
     depends_on:
       postgres:
@@ -114,13 +116,83 @@ services:
     environment:
       - ConnectionStrings__CourseDb=Host=postgres;Database=${POSTGRES_DB:-course};Username=workflow_worker;Password=${COURSE_WORKFLOW_WORKER_PASSWORD:-workflow_worker_pw}
       - COURSE_INSTANCE_ID=worker-b
-      - COURSE_TEST_PROFILE=${COURSE_TEST_PROFILE:-0}
+      - COURSE_TEST_PROFILE=${COURSE_TEST_PROFILE:-1}
       - COURSE_FAILPOINT=${COURSE_FAILPOINT:-}
     depends_on:
       postgres:
         condition: service_healthy
       cli:
         condition: service_completed_successfully
+    networks:
+      - moduldev-network
+    restart: unless-stopped
+
+  outbox-dispatcher:
+    image: moduledev-python:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: moduldev-outbox-dispatcher
+    command: ["dispatcher"]
+    environment:
+      - COURSE_OUTBOX_USER=outbox_dispatcher
+      - COURSE_OUTBOX_PASSWORD=${COURSE_OUTBOX_PASSWORD:-outbox_dispatcher_pw}
+      - PGUSER=outbox_dispatcher
+      - PGPASSWORD=${COURSE_OUTBOX_PASSWORD:-outbox_dispatcher_pw}
+      - OUTBOX_OWNER=outbox-dispatcher
+      - PROVIDER_URL=${PROVIDER_URL:-http://provider-simulator:8081}
+      - COURSE_TEST_PROFILE=${COURSE_TEST_PROFILE:-1}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      cli:
+        condition: service_completed_successfully
+    networks:
+      - moduldev-network
+    restart: unless-stopped
+
+  receipt-adapter:
+    image: moduledev-python:latest
+    container_name: moduldev-receipt-adapter
+    command: ["adapter"]
+    environment:
+      - PROVIDER_CALLBACK_CAPABILITY=${PROVIDER_CALLBACK_CAPABILITY}
+      - PROVIDER_CALLBACK_TOKEN=${PROVIDER_CALLBACK_TOKEN}
+      - PROVIDER_HMAC_SECRET=${PROVIDER_HMAC_SECRET}
+      - RECEIPT_API_URL=${RECEIPT_API_URL:-http://gateway:8080/api/receipt/accept}
+      - COURSE_TEST_PROFILE=${COURSE_TEST_PROFILE:-1}
+    depends_on:
+      gateway:
+        condition: service_started
+    networks:
+      - moduldev-network
+    restart: unless-stopped
+
+  inbox-reconciler:
+    image: moduledev-python:latest
+    container_name: moduldev-inbox-reconciler
+    command: ["reconciler"]
+    environment:
+      - COURSE_INBOX_USER=inbox_reconciler
+      - COURSE_INBOX_PASSWORD=${COURSE_INBOX_PASSWORD:-inbox_reconciler_pw}
+      - PGUSER=inbox_reconciler
+      - PGPASSWORD=${COURSE_INBOX_PASSWORD:-inbox_reconciler_pw}
+      - COURSE_TEST_PROFILE=${COURSE_TEST_PROFILE:-1}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      cli:
+        condition: service_completed_successfully
+    networks:
+      - moduldev-network
+    restart: unless-stopped
+
+  provider-simulator:
+    image: ghcr.io/fintech-dev-lab/internship-provider-simulator:v0.2.0@sha256:70e5e0dd9ab8425be84de431ec74516f9bedf5d5529077358e2e2b2037fe0c74
+    container_name: moduldev-provider-simulator
+    environment:
+      - CALLBACK_URL=http://receipt-adapter:8080/callbacks/provider-v02/${PROVIDER_CALLBACK_CAPABILITY}
+      - AUDIT_TOKEN=${PROVIDER_AUDIT_TOKEN:-audit_token_123}
     networks:
       - moduldev-network
     restart: unless-stopped

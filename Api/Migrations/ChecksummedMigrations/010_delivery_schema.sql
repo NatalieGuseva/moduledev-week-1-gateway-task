@@ -17,11 +17,13 @@
 -- 1. Схема
 CREATE SCHEMA IF NOT EXISTS delivery;
 
--- 2. Роли — идемпотентно, как везде в проекте
+-- 2. Роли — сразу LOGIN + пароль, идемпотентно
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'outbox_dispatcher') THEN
-        CREATE ROLE outbox_dispatcher NOLOGIN;
+        CREATE ROLE outbox_dispatcher LOGIN PASSWORD 'outbox_dispatcher_pw';
+    ELSE
+        ALTER ROLE outbox_dispatcher LOGIN PASSWORD 'outbox_dispatcher_pw';
     END IF;
 END
 $$;
@@ -29,7 +31,9 @@ $$;
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'inbox_reconciler') THEN
-        CREATE ROLE inbox_reconciler NOLOGIN;
+        CREATE ROLE inbox_reconciler LOGIN PASSWORD 'inbox_reconciler_pw';
+    ELSE
+        ALTER ROLE inbox_reconciler LOGIN PASSWORD 'inbox_reconciler_pw';
     END IF;
 END
 $$;

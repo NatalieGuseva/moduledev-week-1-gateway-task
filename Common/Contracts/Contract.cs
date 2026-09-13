@@ -3,6 +3,25 @@ using System.Text.Json.Serialization;
 
 namespace Common.Contracts;
 
+// ============================================================
+// TransportContext — trusted markers, которые generic C# signature boundary
+// (Api/Middleware/ProviderSignatureMiddleware) кладёт в TrustedContext после
+// успешной проверки X-Provider-Signature. По 04_assignment.md target
+// (payment.receipt_accept) получает только эти два маркера:
+//   - transport.signatureVerified — подпись проверена;
+//   - transport.signatureVersion  — версия подписи (сейчас всегда "v1").
+// Target сам решает, обязательна ли подпись для его action, и возвращает
+// 403 receipt.signature_required, если её нет (см. 07-autocheck-outline.md).
+// ============================================================
+public record TransportContext
+{
+    [JsonPropertyName("signatureVerified")]
+    public bool SignatureVerified { get; init; }
+
+    [JsonPropertyName("signatureVersion")]
+    public string? SignatureVersion { get; init; }
+}
+
 public record TrustedContext
 {
     [JsonPropertyName("principal")]
@@ -41,6 +60,14 @@ public record TrustedContext
 
     [JsonPropertyName("attemptId")]
     public Guid? AttemptId { get; init; }
+
+    // Заполняется только ProviderSignatureMiddleware (Api) после успешной
+    // проверки X-Provider-Signature. Для всех остальных вызовов (JWT-only,
+    // Workflow.Worker) остаётся null и не попадает в сериализованный JSON.
+    // Target-функции (receipt.accept) читают p_context -> 'transport' ->>
+    // 'signatureVerified' / 'signatureVersion' и решают, обязательна ли подпись.
+    [JsonPropertyName("transport")]
+    public TransportContext? Transport { get; init; }
 }
 
 public record Meta
