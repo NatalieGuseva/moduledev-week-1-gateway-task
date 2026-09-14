@@ -498,9 +498,9 @@ GRANT EXECUTE ON FUNCTION delivery.fail_outbox(UUID, TEXT, BIGINT, TEXT) TO outb
 GRANT USAGE ON SCHEMA delivery TO inbox_reconciler;
 GRANT EXECUTE ON FUNCTION delivery.reconcile_inbox(INTEGER) TO inbox_reconciler;
 
--- autocheck views — тот же PUBLIC + course_runtime доступ, что у
+-- autocheck views — course_runtime доступ, что у
 -- остальных views схемы (006_workflow_autocheck_views.sql).
-GRANT SELECT ON autocheck.outbox, autocheck.inbox, autocheck.external_requests TO PUBLIC;
+
 GRANT SELECT ON autocheck.outbox, autocheck.inbox, autocheck.external_requests TO course_runtime;
 
 COMMENT ON FUNCTION delivery.claim_outbox(TEXT, INTEGER) IS

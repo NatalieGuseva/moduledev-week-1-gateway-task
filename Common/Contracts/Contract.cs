@@ -6,12 +6,29 @@ namespace Common.Contracts;
 // ============================================================
 // TransportContext — trusted markers, которые generic C# signature boundary
 // (Api/Middleware/ProviderSignatureMiddleware) кладёт в TrustedContext после
-// успешной проверки X-Provider-Signature. По 04_assignment.md target
-// (payment.receipt_accept) получает только эти два маркера:
-//   - transport.signatureVerified — подпись проверена;
-//   - transport.signatureVersion  — версия подписи (сейчас всегда "v1").
-// Target сам решает, обязательна ли подпись для его action, и возвращает
-// 403 receipt.signature_required, если её нет (см. 07-autocheck-outline.md).
+// успешной проверки X-Provider-Signature.
+//
+// Target-функции (payment.receipt_accept) читают эти маркеры и решают,
+// обязательна ли подпись для их action.
+//
+// Поля:
+//   - transport.signatureVerified — подпись проверена (bool);
+//   - transport.signatureVersion  — версия подписи, сейчас всегда "v1";
+//   - transport.rawBodyHash       — exact SHA-256 hex от raw HTTP body bytes,
+//                                   посчитанный ProviderSignatureMiddleware
+//                                   над теми же bytes, что проверены HMAC.
+//
+// rawBodyHash НЕ является частью "trust markers" в смысле 04-week-3.md
+// (там про secret и полную signature) — это производная величина от body,
+// которую SQL использует, чтобы записать body_hash в delivery.inbox,
+// совпадающий с canonical receipt bytes (compact sorted JSON).
+//
+// Зачем это нужно: Postgres JSONB сортирует ключи по длине, потом по
+// алфавиту, а canonical receipt — по алфавиту (json.dumps sort_keys=True).
+// Поэтому SHA-256(jsonb::text) != SHA-256(canonical receipt bytes), и
+// week-3 public checker (adapter-exact-signed-body) падает на сравнении
+// receipt_body_hash / inbox_body_hash с expected_body_hash. Прокидываем
+// точный хэш из C# middleware в p_context, а оттуда — в delivery.inbox.
 // ============================================================
 public record TransportContext
 {
@@ -20,6 +37,15 @@ public record TransportContext
 
     [JsonPropertyName("signatureVersion")]
     public string? SignatureVersion { get; init; }
+
+    // FIX: exact SHA-256 hex от raw HTTP body bytes, посчитанный
+    // ProviderSignatureMiddleware над RawPayloadString (теми же bytes,
+    // над которыми считается HMAC). Прокидывается в p_context, чтобы
+    // SQL мог записать body_hash в delivery.inbox, совпадающий с
+    // canonical receipt bytes (compact sorted JSON, который ожидает
+    // week-3 public checker: adapter-exact-signed-body).
+    [JsonPropertyName("rawBodyHash")]
+    public string? RawBodyHash { get; init; }
 }
 
 public record TrustedContext
@@ -65,7 +91,7 @@ public record TrustedContext
     // проверки X-Provider-Signature. Для всех остальных вызовов (JWT-only,
     // Workflow.Worker) остаётся null и не попадает в сериализованный JSON.
     // Target-функции (receipt.accept) читают p_context -> 'transport' ->>
-    // 'signatureVerified' / 'signatureVersion' и решают, обязательна ли подпись.
+    // 'signatureVerified' / 'signatureVersion' / 'rawBodyHash'.
     [JsonPropertyName("transport")]
     public TransportContext? Transport { get; init; }
 }

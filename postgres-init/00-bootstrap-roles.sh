@@ -3,13 +3,18 @@
 # data-директории (/docker-entrypoint-initdb.d), от имени реального init
 # суперпользователя ($POSTGRES_USER). Больше никогда не выполняется на уже
 # существующей БД — поэтому именно здесь, а не в checksummed-миграциях,
-# заводятся LOGIN-роли course_migrator/course_publisher: миграции применяет
-# cli, а cli должен УЖЕ уметь подключиться под одной из них до того, как
-# первая миграция вообще запустится (курица и яйцо иначе).
+# заводятся LOGIN-роли course_migrator/course_publisher/outbox_dispatcher/
+# inbox_reconciler: миграции — статичные .sql файлы без доступа к env, а
+# cli НЕ входит в allow-list checker'а для COURSE_OUTBOX_PASSWORD/
+# COURSE_INBOX_PASSWORD (checker проверяет, что значение этих секретов
+# встречается только в env postgres и соответствующего python-сервиса —
+# см. docs/configuration.md и _secret_distribution_findings в чекере).
 set -euo pipefail
 
 : "${COURSE_MIGRATOR_PASSWORD:?COURSE_MIGRATOR_PASSWORD is required}"
 : "${COURSE_PUBLISHER_PASSWORD:?COURSE_PUBLISHER_PASSWORD is required}"
+: "${COURSE_OUTBOX_PASSWORD:?COURSE_OUTBOX_PASSWORD is required}"
+: "${COURSE_INBOX_PASSWORD:?COURSE_INBOX_PASSWORD is required}"
 
 psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
     -- course_migrator запускает "cli migration apply". CREATEROLE нужен,
@@ -45,6 +50,33 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-E
     END
     \$\$;
 
+    -- outbox_dispatcher / inbox_reconciler — LOGIN-роли Python
+    -- outbox-dispatcher и inbox-reconciler (неделя 3). Пароль берётся из
+    -- COURSE_OUTBOX_PASSWORD/COURSE_INBOX_PASSWORD — тех же переменных,
+    -- которые checker подставляет synthetic-значением python-сервисам,
+    -- поэтому роль в БД и клиент всегда согласованы. GRANT EXECUTE на
+    -- конкретные функции выдаёт 011_delivery_functions.sql, когда функции
+    -- уже существуют; здесь роль только создаётся/переустанавливает пароль.
+    DO \$\$
+    BEGIN
+        IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'outbox_dispatcher') THEN
+            CREATE ROLE outbox_dispatcher WITH LOGIN PASSWORD '$COURSE_OUTBOX_PASSWORD';
+        ELSE
+            ALTER ROLE outbox_dispatcher WITH LOGIN PASSWORD '$COURSE_OUTBOX_PASSWORD';
+        END IF;
+    END
+    \$\$;
+
+    DO \$\$
+    BEGIN
+        IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'inbox_reconciler') THEN
+            CREATE ROLE inbox_reconciler WITH LOGIN PASSWORD '$COURSE_INBOX_PASSWORD';
+        ELSE
+            ALTER ROLE inbox_reconciler WITH LOGIN PASSWORD '$COURSE_INBOX_PASSWORD';
+        END IF;
+    END
+    \$\$;
+
     -- course_migrator должен иметь право создавать схемы/расширения и т.д.
     -- в этой конкретной базе — сама база создана init-суперпользователем
     -- ($POSTGRES_USER), поэтому по умолчанию (PG15+) CREATE на ней больше
@@ -53,4 +85,4 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-E
     ALTER DATABASE "$POSTGRES_DB" OWNER TO course_migrator;
 EOSQL
 
-echo "course_migrator / course_publisher bootstrap complete"
+echo "course_migrator / course_publisher / outbox_dispatcher / inbox_reconciler bootstrap complete"

@@ -2,7 +2,6 @@
 import logging
 import sys
 import asyncio
-from typing import Optional
 
 from .config import DatabaseConfig, DispatcherConfig, ProviderConfig, AdapterConfig
 from .outbox_dispatcher import OutboxDispatcher
@@ -45,6 +44,10 @@ def run_adapter() -> None:
     run_until_complete(), и затем держать loop живым через run_forever().
     В Python 3.12 asyncio.get_event_loop() без активного loop падает с
     RuntimeError — поэтому используем asyncio.new_event_loop() явно.
+
+    Порт adapter'а НЕ передаётся здесь аргументом: ReceiptAdapter.start()
+    сам читает RECEIPT_ADAPTER_PORT (дефолт 8080), чтобы совпасть с
+    CALLBACK_URL у provider-simulator'а (http://receipt-adapter:8080/...).
     """
     logger.info("Starting receipt-adapter")
 
@@ -55,6 +58,8 @@ def run_adapter() -> None:
     asyncio.set_event_loop(loop)
 
     try:
+        # Без аргумента port — ReceiptAdapter.start() возьмёт
+        # RECEIPT_ADAPTER_PORT (дефолт 8080), согласованный с CALLBACK_URL.
         loop.run_until_complete(adapter.start())
         loop.run_forever()
     except KeyboardInterrupt:

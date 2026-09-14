@@ -11,12 +11,28 @@ namespace Api.Middleware;
 // Неверная signature возвращает 401 signature.invalid; отсутствие
 // подписи у receipt.accept возвращает 403 receipt.signature_required.
 // Остальные actions не обязаны быть подписаны." — то есть заголовок
-// проверяется для ЛЮБОГО запроса, где он присутствует, а решение
-// "обязательна ли подпись для ЭТОГО action" остаётся за самой
-// target-функцией (payment.receipt_accept уже проверяет
-// transport.signatureVerified и возвращает свою 403), а не за этим
-// middleware — здесь только проверка формата и HMAC, само по себе
-// отсутствие заголовка НЕ является ошибкой.
+// проверяется для ЛЮБОГО запроса, где он присутствует.
+//
+// FIX-1 (missing-signature-rejected): для receipt.accept отсутствие
+// заголовка — это НЕ "пусть решает target-функция", а именно 403
+// receipt.signature_required, который обязан быть отдан транспортом
+// ДО api.invoke. Иначе запрос доходит до course.invoke, тот пишет
+// log_dispatch с principal = NULL и падает на NOT NULL в
+// course.action_dispatches → 500 вместо 403. Поэтому здесь для
+// /api/receipt/accept без заголовка сразу возвращаем 403, а в
+// target-функции payment.receipt_accept проверка signatureVerified
+// остаётся как defense-in-depth.
+//
+// FIX-2 (adapter-exact-signed-body): после успешной проверки HMAC
+// middleware считает SHA-256 hex от rawPayload — тех же exact bytes,
+// над которыми считался HMAC, — и кладёт в TransportContext.RawBodyHash.
+// Это значение прокидывается в p_context.transport.rawBodyHash и
+// используется payment.receipt_accept для записи body_hash в
+// delivery.inbox. Без этого Postgres считал бы SHA-256 от jsonb::text,
+// где ключи отсортированы по длине (а не по алфавиту, как в canonical
+// receipt bytes), и week-3 public checker (adapter-exact-signed-body)
+// падал бы на сравнении receipt_body_hash / inbox_body_hash с
+// expected_body_hash.
 //
 // Порядок в конвейере: строго ПОСЛЕ JsonSchemaValidationMiddleware —
 // оно уже вычитало тело через EnableBuffering()+сброс Position, распарсило
@@ -33,6 +49,11 @@ public class ProviderSignatureMiddleware
 {
     private const string HeaderName = "X-Provider-Signature";
     private const string SupportedVersion = "v1";
+
+    // FIX: путь, для которого отсутствие подписи — это 403, а не "пусть
+    // решает target-функция". Сравнение по StartsWithSegments, чтобы не
+    // ловить /api/receipt/accept-fake.
+    private static readonly PathString ReceiptAcceptPath = new("/api/receipt/accept");
 
     private readonly RequestDelegate _next;
     private readonly ILogger<ProviderSignatureMiddleware> _logger;
@@ -69,15 +90,38 @@ public class ProviderSignatureMiddleware
 
         if (!context.Request.Headers.TryGetValue(HeaderName, out var headerValues))
         {
-            // Заголовка нет вообще — не ошибка сама по себе (см. комментарий
-            // класса). transport.signatureVerified просто не попадёт в
-            // context, и уже сама target-функция (receipt.accept) решит,
-            // обязательна ли подпись для конкретного action.
+            // FIX-1: для receipt.accept отсутствие подписи — это 403
+            // receipt.signature_required, отданный транспортом, а НЕ
+            // "пусть target-функция сама решит". Иначе запрос доходит
+            // до api.invoke, тот на error-пути вызывает log_dispatch с
+            // principal = NULL и падает на NOT NULL в action_dispatches,
+            // превращая ожидаемый 403 в 500.
+            if (context.Request.Path.StartsWithSegments(ReceiptAcceptPath))
+            {
+                var rejectCorrelationId = context.Items["CorrelationId"] is Guid cid
+                    ? cid
+                    : Guid.NewGuid();
+                _logger.LogWarning(
+                    "Rejecting {Path}: missing X-Provider-Signature (receipt.accept requires signature)",
+                    context.Request.Path);
+                await CorrelationAndErrorMiddleware.WriteErrorAsync(
+                    context,
+                    StatusCodes.Status403Forbidden,
+                    "receipt.signature_required",
+                    "X-Provider-Signature is required for receipt.accept",
+                    rejectCorrelationId);
+                return;
+            }
+
+            // Для остальных actions отсутствие заголовка — не ошибка
+            // (07-autocheck-outline.md: "Остальные actions не обязаны
+            // быть подписаны"). transport.signatureVerified просто не
+            // попадёт в context.
             await _next(context);
             return;
         }
 
-        var correlationId = context.Items["CorrelationId"] is Guid cid ? cid : Guid.NewGuid();
+        var correlationId = context.Items["CorrelationId"] is Guid cid2 ? cid2 : Guid.NewGuid();
         var headerValue = headerValues.FirstOrDefault() ?? string.Empty;
 
         // Формат зафиксирован дословно: "v1=<lowercase-hex-hmac-sha256>"
@@ -131,7 +175,12 @@ public class ProviderSignatureMiddleware
             return;
         }
 
-        var expectedBytes = HMACSHA256.HashData(_secretBytes, Encoding.UTF8.GetBytes(rawPayload));
+        // Точные UTF-8 bytes тела — те же, над которыми считается HMAC
+        // (07-autocheck-outline.md: "над точными HTTP body bytes") и над
+        // которыми ниже посчитается SHA-256 для delivery.inbox.body_hash.
+        var rawPayloadBytes = Encoding.UTF8.GetBytes(rawPayload);
+
+        var expectedBytes = HMACSHA256.HashData(_secretBytes, rawPayloadBytes);
 
         // Сравнение с фиксированным временем выполнения — HMAC-подпись
         // сравнивается побайтово, а не через string.Equals/StringComparison,
@@ -143,6 +192,24 @@ public class ProviderSignatureMiddleware
             return;
         }
 
+        // FIX-2: exact SHA-256 hex от rawPayload — тех же bytes, над
+        // которыми только что проверен HMAC. Прокидывается в
+        // p_context.transport.rawBodyHash, оттуда payment.receipt_accept
+        // передаёт его в delivery.record_inbox как body_hash. Это
+        // гарантирует, что body_hash в delivery.inbox совпадает с
+        // canonical receipt bytes (compact sorted JSON, который
+        // подписывает adapter и ожидает week-3 public checker:
+        // adapter-exact-signed-body). Без этого Postgres считал бы
+        // SHA-256(jsonb::text), где порядок ключей — по длине, а не
+        // по алфавиту, и хэши расходились бы.
+        //
+        // ToHexString даёт UPPERCASE; PostgreSQL ENCODE(..., 'hex') и
+        // Python hashlib.hexdigest() дают lowercase, поэтому явно
+        // приводим к нижнему регистру — иначе сравнение с
+        // expected_body_hash у чекера не сойдётся по регистру.
+        var rawBodyHash = Convert.ToHexString(SHA256.HashData(rawPayloadBytes))
+            .ToLowerInvariant();
+
         var trustedContext = context.Items["TrustedContext"] as TrustedContext;
         if (trustedContext != null)
         {
@@ -151,7 +218,8 @@ public class ProviderSignatureMiddleware
                 Transport = new TransportContext
                 {
                     SignatureVerified = true,
-                    SignatureVersion = SupportedVersion
+                    SignatureVersion = SupportedVersion,
+                    RawBodyHash = rawBodyHash
                 }
             };
         }

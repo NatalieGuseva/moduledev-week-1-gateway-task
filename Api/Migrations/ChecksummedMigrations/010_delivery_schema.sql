@@ -3,27 +3,26 @@
 -- outbox_dispatcher / inbox_reconciler (неделя 3, Python-периметр)
 -- ============================================================
 --
--- Ровно тот же паттерн, что workflow-схема в 005_workflow_schema.sql:
--- роли создаются здесь как NOLOGIN (миграции — статичные .sql файлы
--- без доступа к переменным окружения), реальный LOGIN и пароль им
--- выставляет отдельный bootstrap-шаг в Cli/Program.cs ПОД РЕАЛЬНЫМ
--- суперпользователем (COURSE_POSTGRES_PASSWORD) — не под course_migrator:
--- ALTER ROLE ... WITH LOGIN PASSWORD требует ADMIN OPTION на целевой роли,
--- а её устойчивое наличие у course_migrator для ролей, созданных внутри
--- миграций, на практике (проверено прогоном на PG16) не гарантировано.
+-- Реальный LOGIN и пароль этим ролям выставляет postgres-init
+-- (postgres-init/00-bootstrap-roles.sh) при первой инициализации тома,
+-- из COURSE_OUTBOX_PASSWORD/COURSE_INBOX_PASSWORD — тех же переменных,
+-- которые checker передаёт python-сервисам synthetic-значением.
+-- Здесь (миграция — статичный .sql без доступа к env) роль только
+-- создаётся как NOLOGIN fallback, если её почему-то ещё нет, и пароль
+-- НЕ трогается, если роль уже существует — иначе миграция перезапишет
+-- synthetic-пароль локальным placeholder'ом и сломает аутентификацию
+-- под checker (именно так и было раньше — отсюда ошибка).
 -- GRANT EXECUTE на конкретные функции — уже в 011_delivery_functions.sql,
 -- после того как сами функции появятся.
 
 -- 1. Схема
 CREATE SCHEMA IF NOT EXISTS delivery;
 
--- 2. Роли — сразу LOGIN + пароль, идемпотентно
+-- 2. Роли — fallback-создание, пароль ставит postgres-init (см. выше)
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'outbox_dispatcher') THEN
-        CREATE ROLE outbox_dispatcher LOGIN PASSWORD 'outbox_dispatcher_pw';
-    ELSE
-        ALTER ROLE outbox_dispatcher LOGIN PASSWORD 'outbox_dispatcher_pw';
+        CREATE ROLE outbox_dispatcher NOLOGIN;
     END IF;
 END
 $$;
@@ -31,9 +30,7 @@ $$;
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'inbox_reconciler') THEN
-        CREATE ROLE inbox_reconciler LOGIN PASSWORD 'inbox_reconciler_pw';
-    ELSE
-        ALTER ROLE inbox_reconciler LOGIN PASSWORD 'inbox_reconciler_pw';
+        CREATE ROLE inbox_reconciler NOLOGIN;
     END IF;
 END
 $$;
@@ -51,11 +48,6 @@ CREATE TABLE delivery.outbox (
     outbox_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     operation_id UUID NOT NULL,
     external_request_id TEXT NOT NULL,
-    -- payload_hash недостающего external_request: в этом дизайне нет
-    -- отдельной таблицы external_request (см. комментарий выше), поэтому
-    -- то, что должно быть её колонкой по 04-week-3.md ("Проверочные
-    -- проекции" -> external_requests.payload_hash), хранится прямо
-    -- здесь — иначе autocheck.external_requests нечем будет заполнить.
     payload_hash TEXT NOT NULL,
     correlation_id UUID NOT NULL DEFAULT gen_random_uuid(),
     amount NUMERIC(19,2) NOT NULL,
@@ -84,8 +76,6 @@ COMMENT ON COLUMN delivery.outbox.state IS
     'DEAD — терминальная non-retryable ошибка или исчерпаны попытки (имя состояния зафиксировано '
     '07-autocheck-outline.md; настоящий dead-letter/несколько dispatcher — неделя 4).';
 
--- Индекс под claim_outbox: короткая транзакция с FOR UPDATE SKIP LOCKED,
--- ровно как idx_workflow_job_claimable в 005_workflow_schema.sql.
 CREATE INDEX idx_outbox_claimable
     ON delivery.outbox (next_attempt_at)
     WHERE state IN ('PENDING', 'RETRY_WAIT');
@@ -95,13 +85,7 @@ CREATE INDEX idx_outbox_operation_id ON delivery.outbox (operation_id);
 
 -- ============================================================
 -- 4. delivery.inbox — принятые receipt'ы, ожидающие/применённые
---    как workflow-сигнал. process_id и signal_type сохраняются
---    здесь же (не читаются заново из course/workflow схем), потому
---    что reconcile_inbox по заданию не имеет прямого DML доступа ни
---    к чему, кроме своей одной функции — все данные, нужные ей для
---    workflow.receive_signal, обязаны лежать в этой же строке.
---    message_id — глобально уникален (PRIMARY KEY): это и есть
---    дедупликация duplicate/conflicting callback на уровне Inbox.
+--    как workflow-сигнал.
 -- ============================================================
 CREATE TABLE delivery.inbox (
     message_id TEXT PRIMARY KEY,
@@ -132,12 +116,6 @@ CREATE INDEX idx_inbox_external_request_id ON delivery.inbox (external_request_i
 -- ============================================================
 -- Владение и права
 -- ============================================================
--- outbox_dispatcher/inbox_reconciler намеренно не получают здесь
--- ничего — ни SELECT, ни тем более DML. Доступ появится в
--- 011_delivery_functions.sql ровно на 4 функции (claim/succeed/fail
--- /reconcile), как то же самое сделано для workflow_worker в
--- 007_workflow_functions.sql.
-
 ALTER SCHEMA delivery OWNER TO course_owner;
 ALTER TABLE delivery.outbox OWNER TO course_owner;
 ALTER TABLE delivery.inbox OWNER TO course_owner;

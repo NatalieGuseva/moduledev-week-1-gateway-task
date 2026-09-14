@@ -35,14 +35,8 @@ ALTER TABLE delivery.inbox ADD COLUMN signature_valid BOOLEAN NOT NULL DEFAULT T
 ALTER TABLE delivery.inbox ALTER COLUMN message_version DROP DEFAULT;
 ALTER TABLE delivery.inbox ALTER COLUMN signature_valid DROP DEFAULT;
 
--- 0.2 delivery.record_inbox получает новый обязательный параметр
---     (p_message_version/p_signature_valid) и теряет p_body_hash: тело
---     дедуплицируется прямым JSONB-сравнением (v_existing.body = p_body),
---     а не сравнением заранее посчитанного хэша — см. подробное
---     обоснование в комментарии перед payment.receipt_accept ниже.
---     Меняем сигнатуру — DROP, а не просто REPLACE (Postgres не даёт
---     REPLACE поменять список параметров).
 DROP FUNCTION IF EXISTS delivery.record_inbox(TEXT, TEXT, UUID, TEXT, JSONB, TEXT, TEXT);
+DROP FUNCTION IF EXISTS delivery.record_inbox(TEXT, TEXT, UUID, TEXT, JSONB, TEXT, INTEGER, BOOLEAN);
 
 CREATE OR REPLACE FUNCTION delivery.record_inbox(
     p_message_id TEXT,
@@ -52,7 +46,8 @@ CREATE OR REPLACE FUNCTION delivery.record_inbox(
     p_body JSONB,
     p_outcome TEXT,
     p_message_version INTEGER,
-    p_signature_valid BOOLEAN
+    p_signature_valid BOOLEAN,
+    p_body_hash TEXT
 ) RETURNS JSONB
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -60,15 +55,17 @@ SET search_path = delivery, public, pg_catalog
 AS $$
 DECLARE
     v_existing delivery.inbox%ROWTYPE;
-    v_body_hash TEXT;
 BEGIN
-    -- Хэш — только для autocheck.receipts.body_hash (обзорная/аудиторская
-    -- колонка). Дедупликация ниже сравнивает САМ p_body, а не этот хэш —
-    -- jsonb::text детерминирован для равных jsonb-значений (одинаковый
-    -- канонический вид при повторной сериализации), но это НЕ обязано
-    -- совпадать байт-в-байт с оригинальными подписанными HTTP body bytes,
-    -- поэтому как источник истины для "тот же документ" не годится.
-    v_body_hash := ENCODE(DIGEST(p_body::TEXT, 'sha256'), 'hex');
+    -- p_body_hash — exact SHA-256 hex от raw HTTP body bytes, посчитанный
+    -- ProviderSignatureMiddleware (RawBodyHash в TransportContext) и
+    -- проброшенный через p_context.transport.rawBodyHash. Единственный
+    -- источник body_hash, совпадающий с canonical receipt bytes
+    -- (compact sorted JSON, json.dumps(sort_keys=True, separators=(',',':'),
+    -- ensure_ascii=False)). Postgres НЕ может восстановить такие байты
+    -- из p_body::TEXT: JSONB сортирует ключи по длине, потом по алфавиту,
+    -- а canonical receipt — чисто по алфавиту. Дедупликация ниже
+    -- по-прежнему сравнивает САМ p_body (JSONB), а не хэш — хэш нужен
+    -- только для аудита и сравнения с canonical bytes на стороне чекера.
 
     SELECT * INTO v_existing FROM delivery.inbox WHERE message_id = p_message_id FOR UPDATE;
 
@@ -89,8 +86,8 @@ BEGIN
     INSERT INTO delivery.inbox (
         message_id, external_request_id, process_id, signal_type, body, body_hash,
         outcome, message_version, signature_valid, state
-    ) VALUES (
-        p_message_id, p_external_request_id, p_process_id, p_signal_type, p_body, v_body_hash,
+       ) VALUES (
+        p_message_id, p_external_request_id, p_process_id, p_signal_type, p_body, p_body_hash,
         p_outcome, p_message_version, p_signature_valid, 'RECEIVED'
     );
 
@@ -101,10 +98,12 @@ BEGIN
 END;
 $$;
 
-ALTER FUNCTION delivery.record_inbox(TEXT, TEXT, UUID, TEXT, JSONB, TEXT, INTEGER, BOOLEAN) OWNER TO course_owner;
+ALTER FUNCTION delivery.record_inbox(TEXT, TEXT, UUID, TEXT, JSONB, TEXT, INTEGER, BOOLEAN, TEXT) OWNER TO course_owner;
 
-COMMENT ON FUNCTION delivery.record_inbox(TEXT, TEXT, UUID, TEXT, JSONB, TEXT, INTEGER, BOOLEAN) IS
-    'internal: идемпотентная запись Inbox из payment.receipt_accept — DUPLICATE при JSONB-равенстве body, idempotency.conflict при отличии.';
+COMMENT ON FUNCTION delivery.record_inbox(TEXT, TEXT, UUID, TEXT, JSONB, TEXT, INTEGER, BOOLEAN, TEXT) IS
+    'internal: идемпотентная запись Inbox из payment.receipt_accept — DUPLICATE при JSONB-равенстве body, idempotency.conflict при отличии; body_hash берётся из p_body_hash (exact SHA-256 от raw HTTP bytes, посчитанный ProviderSignatureMiddleware).';
+
+
 
 -- 0.3 payment.decision — аудит авто/ручного решения payment-review.
 --     Таблицы раньше не было ни в одном применённом файле (010/011
@@ -601,6 +600,7 @@ SET search_path = payment, delivery, course, public, pg_catalog
 AS $$
 DECLARE
     v_signature_verified BOOLEAN;
+    v_raw_body_hash TEXT;
     v_external_request_id TEXT;
     v_message_id TEXT;
     v_occurred_at TEXT;
@@ -611,10 +611,24 @@ DECLARE
     v_record_result JSONB;
 BEGIN
     v_signature_verified := COALESCE((p_context #>> '{transport,signatureVerified}')::BOOLEAN, FALSE);
-    IF NOT v_signature_verified THEN
+        IF NOT v_signature_verified THEN
         RETURN jsonb_build_object(
             'status', 'error', 'code', 'receipt.signature_required',
             'message', 'X-Provider-Signature is required for receipt.accept', 'retryable', false
+        );
+    END IF;
+
+    -- FIX: exact SHA-256 hex от raw HTTP body bytes, посчитанный
+    -- ProviderSignatureMiddleware. Обязателен: иначе body_hash пришлось
+    -- бы считать из p_body::TEXT, что даёт Postgres-канонический
+    -- JSONB-порядок (по длине ключа), а не compact sorted JSON
+    -- (по алфавиту), который подписывает adapter и ожидает week-3
+    -- public checker (adapter-exact-signed-body).
+    v_raw_body_hash := p_context #>> '{transport,rawBodyHash}';
+    IF v_raw_body_hash IS NULL OR v_raw_body_hash = '' THEN
+        RETURN jsonb_build_object(
+            'status', 'error', 'code', 'internal.error',
+            'message', 'transport.rawBodyHash is required for receipt.accept', 'retryable', false
         );
     END IF;
 
@@ -636,9 +650,9 @@ BEGIN
         );
     END IF;
 
-    v_record_result := delivery.record_inbox(
+        v_record_result := delivery.record_inbox(
         v_message_id, v_external_request_id, v_process_id, 'payment.receipt',
-        p_payload, v_outcome, v_version, v_signature_verified
+        p_payload, v_outcome, v_version, v_signature_verified, v_raw_body_hash
     );
 
     IF v_record_result->>'status' <> 'ok' THEN
